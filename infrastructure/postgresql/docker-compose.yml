@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:latest
+    container_name: postgres
+    environment:
+      POSTGRES_USER: fedex
+      POSTGRES_PASSWORD: 234
+      POSTGRES_DB: ecommerce
+      POSTGRES_MAX_CONNECTIONS: 100
+      POSTGRES_SHARED_BUFFERS: 256MB
+      POSTGRES_WORK_MEM: 32MB
+      POSTGRES_MAINTENANCE_WORK_MEM: 64MB
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - postgres_network
+    restart: unless-stopped
+    shm_size: '2gb'  # Ajusta según la memoria de tu sistema
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_LISTEN_PORT: 80
+    ports:
+      - "5050:80"
+    networks:
+      - postgres_network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  postgres_network:
+    driver: bridge
