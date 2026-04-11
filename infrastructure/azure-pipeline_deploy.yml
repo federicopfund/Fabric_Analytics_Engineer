@@ -1,0 +1,30 @@
+trigger:
+- main 
+pool:
+ vmImage: 'windows-latest'
+
+steps: 
+- task: AzurePowerShell@5
+  inputs:
+    azureSubscription: 'tu_sucripcion_azure'
+    ScriptType: 'FilePath'
+    ScriptPath: './script.ps1'
+    errorActionPreference: 'continue'
+    azurePowerShellVersion: 'LatestVersion'
+  
+
+- task: PublishPipelineArtifact@1
+  inputs:
+    targetPath: '$(Pipeline.Workspace)'
+    artifactType: 'pipeline'
+    artifactName: 'drop'
+
+    
+
+
+
+
+
+
+
+
