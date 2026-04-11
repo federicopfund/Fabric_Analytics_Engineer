@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- Configuración del ResourceManager -->
+    <property>
+        <name>yarn.resourcemanager.hostname</name>
+        <value>localhost</value>
+    </property>
+
+    <!-- Número máximo de intentos para reiniciar nodos NodeManager -->
+    <property>
+        <name>yarn.resourcemanager.nodemanager-recovery.max-completed-applications</name>
+        <value>10</value>
+    </property>
+
+    <!-- Dirección del servicio de seguimiento del ResourceManager -->
+    <property>
+        <name>yarn.resourcemanager.webapp.address</name>
+        <value>localhost:8088</value>
+    </property>
+
+    <!-- Configuración del NodeManager -->
+    <property>
+        <name>yarn.nodemanager.local-dirs</name>
+        <value>/path/to/nodemanager/data</value>
+    </property>
+
+    <!-- Configuración del NodeManager para la localización de los logs -->
+    <property>
+        <name>yarn.nodemanager.log-dirs</name>
+        <value>/path/to/nodemanager/logs</value>
+    </property>
+
+    <!-- Configuración de recursos para contenedores NodeManager -->
+    <property>
+        <name>yarn.nodemanager.resource.memory-mb</name>
+        <value>2048</value>
+    </property>
+    <property>
+        <name>yarn.nodemanager.resource.cpu-vcores</name>
+        <value>2</value>
+    </property>
+
+    <!-- Configuración de la cola de aplicaciones -->
+    <property>
+        <name>yarn.scheduler.capacity.root.default.capacity</name>
+        <value>100</value>
+    </property>
+
+    <!-- Límites de recursos por cola -->
+    <property>
+        <name>yarn.scheduler.capacity.root.default.maximum-capacity</name>
+        <value>100</value>
+    </property>
+
+    <!-- Política de asignación de recursos -->
+    <property>
+        <name>yarn.scheduler.capacity.root.default.acl_submit_applications</name>
+        <value>*</value>
+    </property>
+
+    <!-- Configuraciones avanzadas adicionales -->
+    
+    <!-- Habilitar el rastreo de contenedores -->
+    <property>
+        <name>yarn.log-aggregation-enable</name>
+        <value>true</value>
+    </property>
+    
+    <!-- Ruta del directorio para la agregación de logs -->
+    <property>
+        <name>yarn.nodemanager.remote-app-log-dir</name>
+        <value>/path/to/nodemanager/logs</value>
+    </property>
+
+    <!-- Configuración de reintentos para ApplicationMaster -->
+    <property>
+        <name>yarn.resourcemanager.am.max-attempts</name>
+        <value>2</value>
+    </property>
+
+    <!-- Configuración de la política de asignación de recursos por aplicación -->
+    <property>
+        <name>yarn.scheduler.fair.allow-undeclared-pools</name>
+        <value>true</value>
+    </property>
+</configuration>
+

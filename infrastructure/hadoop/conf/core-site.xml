@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- Configuración de la ubicación del sistema de archivos predeterminado -->
+    <property>
+        <name>fs.defaultFS</name>
+        <value>hdfs://namenode:9000</value>
+    </property>
+
+    <!-- Configuración del directorio del navegador de Hadoop -->
+    <property>
+        <name>hadoop.http.filter.initializers</name>
+        <value>org.apache.hadoop.http.lib.StaticUserWebFilter</value>
+    </property>
+    <property>
+        <name>dfs.http.address</name>
+        <value>0.0.0.0:50070</value> <!-- Puerto del navegador de Hadoop -->
+    </property>
+    <property>
+        <name>dfs.http.dir</name>
+        <value>/hadoop/browsedir</value> <!-- Directorio personalizado del navegador de Hadoop -->
+    </property>
+
+  <!-- Configuración del directorio de recursos estáticos del navegador web de Hadoop -->
+    <property>
+        <name>hadoop.http.staticuser.user</name>
+        <value>hadoop-user</value>
+    </property>
+
+    <!-- Configuración de la autenticación de usuarios estáticos del navegador web de Hadoop -->
+    <property>
+        <name>hadoop.http.staticuser.password</name>
+        <value>hadoop-password</value>
+    </property>
+
+    <!-- Configuración del tiempo de espera de sesión del navegador web de Hadoop (en milisegundos) -->
+    <property>
+        <name>dfs.browsedir.session.timeout</name>
+        <value>600000</value>
+    </property>
+
+    <!-- Configuración del tiempo de espera de conexión del navegador web de Hadoop (en milisegundos) -->
+    <property>
+        <name>dfs.browsedir.connect.timeout</name>
+        <value>50000</value>
+    </property>
+
+    <!-- Configuración del límite de resultados de listado de directorios del navegador web de Hadoop -->
+    <property>
+        <name>dfs.browsedir.list.limit</name>
+        <value>1000</value>
+    </property>
+
+    <!-- Configuración de la autenticación de usuario del navegador web de Hadoop -->
+    <property>
+        <name>dfs.browsedir.auth.simple.anonymous.allowed</name>
+        <value>false</value>
+    </property>
+    <property>
+        <name>dfs.browsedir.auth.simple.anonymous.username</name>
+        <value>anonymous</value>
+    </property>
+    <property>
+        <name>dfs.browsedir.auth.simple.anonymous.password</name>
+        <value>anonymous-password</value>
+    </property>
+
+    <!-- Configuración de otros parámetros del navegador web de Hadoop -->
+    <property>
+        <name>dfs.browsedir.listing.exclude.tmp</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>dfs.browsedir.listing.exclude.user</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>dfs.browsedir.listing.exclude.data</name>
+        <value>true</value>
+    </property>
+
+    <!-- Configuración de almacenamiento en caché -->
+    <property>
+        <name>fs.local.block.size</name>
+        <value>134217728</value> <!-- Tamaño del bloque local (en bytes) -->
+    </property>
+
+    <!-- Configuración de nombres de recurso de Hadoop -->
+    <property>
+        <name>hadoop.security.auth_to_local</name>
+        <value>DEFAULT</value>
+    </property>
+
+    <!-- Configuración de la interfaz de usuario de Hadoop -->
+    <property>
+        <name>hadoop.security.instrumentation.requires.admin</name>
+        <value>true</value>
+    </property>
+
+    <!-- Configuración de replicación de bloques predeterminada -->
+    <property>
+        <name>dfs.replication</name>
+        <value>3</value>
+    </property>
+
+    <!-- Configuración de almacenamiento de metadatos -->
+
+
+    <!-- Configuración de caché de nombres de nodo -->
+    <property>
+        <name>dfs.namenode.name.dir</name>
+        <value>/hadoop/namenode</value>
+    </property>
+    <property>
+        <name>dfs.namenode.edits.dir</name>
+        <value>/hadoop/namenode</value>
+    </property>
+
+    <!-- Otras configuraciones... -->
+
+    <!-- Configuración de la ubicación del directorio temporal para Hadoop -->
+    <property>
+        <name>hadoop.tmp.dir</name>
+        <value>/opt/hadoop/tmp</value>
+    </property>
+
+    <!-- Configuración de la interfaz de red que debe utilizarse para la comunicación de Hadoop -->
+    <property>
+        <name>hadoop.bind.address</name>
+        <value>0.0.0.0</value>
+    </property>
+
+    <!-- Configuración para habilitar el registro de auditoría de Hadoop -->
+    <property>
+        <name>hadoop.security.audit.log</name>
+        <value>hdfs://namenode:8020/audit.log</value>
+    </property>
+
+    <!-- Configuración de la política de acceso predeterminada para el sistema de archivos -->
+    <property>
+        <name>fs.permissions.umask-mode</name>
+        <value>022</value>
+    </property>
+
+    <!-- Configuración de la velocidad de transferencia predeterminada para el sistema de archivos -->
+    <property>
+        <name>dfs.namenode.handler.count</name>
+        <value>100</value>
+    </property>
+</configuration>
