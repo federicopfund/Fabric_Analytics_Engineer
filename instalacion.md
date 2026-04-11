@@ -109,7 +109,7 @@ http://localhost:8080
 
 ```
 cd --
-cd /home/fede/data-engineer/cicd-etl/job/tasks/ScalaETL/src/main/resources/csv
+cd /home/fede/data-engineer/transformation/spark-jobs/pipelines/batch-etl-scala/src/main/resources/csv
 ```
 >Es posible que veas la carpeta data:
 >Ahora mueve esa carpeta a: `opt/spark/spark-warehouse.`
@@ -140,21 +140,21 @@ ls -l
 ```
 ./bin/spark-submit \
                 --master spark://localhost:7077 \
-                 $HOME/Documents/notebooks/cicd-etl/job/tasks/etl.py
+                 $HOME/Documents/notebooks/transformation/spark-jobs/pipelines/batch-etl-python/etl.py
 
 ```
 >En mi caso solo para el archivo VentasInternet.csv:
 ```
 ./bin/spark-submit \
                 --master spark://fede:7077 \
-                 $HOME/Documents/notebooks/cicd-etl/job/tasks/etl.py VentasInternet.csv
+                 $HOME/Documents/notebooks/transformation/spark-jobs/pipelines/batch-etl-python/etl.py VentasInternet.csv
 
 ```
 > Si quiere ejecutar todas las tranformaciones con el siguiente comando:
 
 ```
 ./bin/spark-submit --master spark://fede:7077 \
-                    $HOME/Documents/notebooks/cicd-etl/job/tasks/etl.py\
+                    $HOME/Documents/notebooks/transformation/spark-jobs/pipelines/batch-etl-python/etl.py\
                      VentasInternet.csv \
                      Categoria.csv \
                      FactMine.csv \
