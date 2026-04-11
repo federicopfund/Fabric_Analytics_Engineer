@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-master-service
+spec:
+  selector:
+    app: spark-master
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080  # Se ajusta al puerto de la interfaz web de Spark
+  type: LoadBalancer
+  externalTrafficPolicy: Local  # Asegura que el tráfico se enrute localmente (si es posible)
+  loadBalancerSourceRanges:
+    - 0.0.0.0/0  # Limita el acceso solo a IPs específicas si es posible
