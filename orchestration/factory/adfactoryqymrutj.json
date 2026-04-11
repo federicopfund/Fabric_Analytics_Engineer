@@ -1,0 +1,20 @@
+{
+	"name": "adfactoryqymrutj",
+	"properties": {
+		"globalParameters": {
+			"Nombredb": {
+				"type": "string",
+				"value": "dbRetail"
+			}
+		},
+		"globalConfigurations": {
+			"PipelineBillingEnabled": "true"
+		}
+	},
+	"location": "EastUS",
+	"identity": {
+		"type": "SystemAssigned",
+		"principalId": "b4109cb9-8e17-4ba9-b7f7-4442d2da1f07",
+		"tenantId": "50a68648-8a2a-489c-b745-643d4d86d1e3"
+	}
+}

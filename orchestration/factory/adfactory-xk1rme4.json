@@ -1,0 +1,9 @@
+{
+	"name": "adfactory-xk1rme4",
+	"location": "East US",
+	"identity": {
+		"type": "SystemAssigned",
+		"principalId": "acd32b42-f3e8-4c83-9901-26b895cd3cab",
+		"tenantId": "50a68648-8a2a-489c-b745-643d4d86d1e3"
+	}
+}

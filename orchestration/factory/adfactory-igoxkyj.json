@@ -1,0 +1,9 @@
+{
+	"name": "adfactory-igoxkyj",
+	"location": "East US",
+	"identity": {
+		"type": "SystemAssigned",
+		"principalId": "8b60e76e-3027-4771-98e0-31da8b0a34de",
+		"tenantId": "50a68648-8a2a-489c-b745-643d4d86d1e3"
+	}
+}

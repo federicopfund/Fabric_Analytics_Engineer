@@ -1,0 +1,193 @@
+{
+	"name": "Pipeline_llenado_db",
+	"properties": {
+		"activities": [
+			{
+				"name": "Consulta aSQL",
+				"type": "Lookup",
+				"dependsOn": [],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "AzureSqlSource",
+						"sqlReaderQuery": {
+							"value": "IF OBJECT_ID (N'Productos_Sucursales', N'U') IS NOT NULL \n   SELECT 1 AS res ELSE SELECT 0 AS res;",
+							"type": "Expression"
+						},
+						"queryTimeout": "02:00:00",
+						"partitionOption": "None"
+					},
+					"dataset": {
+						"referenceName": "AzureSqlTable",
+						"type": "DatasetReference"
+					},
+					"firstRowOnly": false
+				}
+			},
+			{
+				"name": "Filtramos respuesta",
+				"type": "SetVariable",
+				"dependsOn": [
+					{
+						"activity": "Consulta aSQL",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "res",
+					"value": {
+						"value": "@bool(activity('Consulta aSQL').output.value[0].res)",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "If Condition1",
+				"type": "IfCondition",
+				"dependsOn": [
+					{
+						"activity": "Filtramos respuesta",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"expression": {
+						"value": "@variables('res')",
+						"type": "Expression"
+					},
+					"ifFalseActivities": [
+						{
+							"name": "Script1",
+							"type": "Script",
+							"dependsOn": [],
+							"policy": {
+								"timeout": "0.12:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"linkedServiceName": {
+								"referenceName": "AzureLinkServiceSqlDatabas",
+								"type": "LinkedServiceReference"
+							},
+							"typeProperties": {
+								"scripts": [
+									{
+										"type": "NonQuery",
+										"text": {
+											"value": "IF OBJECT_ID(N'dbo.Producto_Unico', N'U') IS NULL   \nBEGIN\n    CREATE TABLE [dbo].[Producto_Unico] (\n\t\tCod_Producto INT IDENTITY(1,1) PRIMARY KEY,\n\t\t Producto VARCHAR(50),\n        Cod_Subcategoria INT,\n        Cod_Categoria INT)\n\nEND",
+											"type": "Expression"
+										}
+									},
+									{
+										"type": "NonQuery",
+										"text": {
+											"value": "IF OBJECT_ID(N'dbo.Productos_Sucursales', N'U') IS NULL   \nBEGIN\n  CREATE TABLE Productos_Sucursales (\n      Cod_Producto INT,\n      Cod_Sucursal INT,\n      Stock INT,\n      Stock_Inicial INT,\n    PRIMARY KEY(Cod_Producto,Cod_Sucursal));\n\nEND",
+											"type": "Expression"
+										}
+									}
+								],
+								"scriptBlockExecutionTimeout": "02:00:00"
+							}
+						}
+					]
+				}
+			},
+			{
+				"name": "diccionario_de_tablas",
+				"type": "SetVariable",
+				"dependsOn": [
+					{
+						"activity": "If Condition1",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "array_tablas",
+					"value": {
+						"value": "@pipeline().parameters.diccionario_tablas",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "Copiar_tabas_sql_a_csv",
+				"type": "ExecutePipeline",
+				"dependsOn": [
+					{
+						"activity": "diccionario_de_tablas",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"pipeline": {
+						"referenceName": "Pipeline_extraccion",
+						"type": "PipelineReference"
+					},
+					"waitOnCompletion": true,
+					"parameters": {
+						"cw_items": {
+							"value": "@variables('array_tablas')",
+							"type": "Expression"
+						}
+					}
+				}
+			}
+		],
+		"parameters": {
+			"diccionario_tablas": {
+				"type": "array",
+				"defaultValue": [
+					{
+						"source": {
+							"table": "Producto_Unico"
+						},
+						"destination": {
+							"fileName": "Producto_Unico.csv"
+						}
+					},
+					{
+						"source": {
+							"table": "Productos_Sucursales"
+						},
+						"destination": {
+							"fileName": "Productos_Sucursales.csv"
+						}
+					}
+				]
+			}
+		},
+		"variables": {
+			"res": {
+				"type": "Boolean"
+			},
+			"array_tablas": {
+				"type": "Array"
+			}
+		},
+		"annotations": [],
+		"lastPublishTime": "2022-11-16T13:54:15Z"
+	},
+	"type": "Microsoft.DataFactory/factories/pipelines"
+}

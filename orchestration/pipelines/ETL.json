@@ -1,0 +1,210 @@
+{
+	"name": "ETL",
+	"properties": {
+		"activities": [
+			{
+				"name": "Nombre tablas csv",
+				"description": "Obtengo la metadata del dataset",
+				"type": "GetMetadata",
+				"dependsOn": [],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"dataset": {
+						"referenceName": "carpeta_csv",
+						"type": "DatasetReference"
+					},
+					"fieldList": [
+						"childItems"
+					],
+					"storeSettings": {
+						"type": "AzureBlobStorageReadSettings",
+						"recursive": true,
+						"enablePartitionDiscovery": false
+					},
+					"formatSettings": {
+						"type": "DelimitedTextReadSettings"
+					}
+				}
+			},
+			{
+				"name": "Extraer nombre csv",
+				"description": "recorro el json que metadata me devuelve",
+				"type": "ForEach",
+				"dependsOn": [
+					{
+						"activity": "Nombre tablas csv",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"items": {
+						"value": "@activity('Nombre tablas csv').output.childItems",
+						"type": "Expression"
+					},
+					"activities": [
+						{
+							"name": "Nombre____tabla_csv",
+							"description": "Se queda con el nombre de la tabla, que viene del json de metadata",
+							"type": "AppendVariable",
+							"dependsOn": [],
+							"userProperties": [],
+							"typeProperties": {
+								"variableName": "variables",
+								"value": {
+									"value": "@item().name",
+									"type": "Expression"
+								}
+							}
+						}
+					]
+				}
+			},
+			{
+				"name": "Nombres  csv",
+				"description": "Construye un String de nombres de tablas ",
+				"type": "SetVariable",
+				"dependsOn": [
+					{
+						"activity": "Extraer nombre csv",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "cadena_archivos",
+					"value": {
+						"value": "@join(variables('variables'),',')",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "Databricks Tranformaciones",
+				"type": "DatabricksNotebook",
+				"dependsOn": [
+					{
+						"activity": "Nombres  csv",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"notebookPath": "/Repos/dev/dev/ETL/tranformacion_csv"
+				},
+				"linkedServiceName": {
+					"referenceName": "LinkendServiceTranformaciones",
+					"type": "LinkedServiceReference"
+				}
+			}
+		],
+		"parameters": {
+			"cw_items": {
+				"type": "Array",
+				"defaultValue": [
+					{
+						"source": {
+							"table": "Categoria"
+						},
+						"destination": {
+							"fileName": "dboCategoria.csv"
+						}
+					},
+					{
+						"source": {
+							"table": "FactMine"
+						},
+						"destination": {
+							"fileName": "dboFactMine.csv"
+						}
+					},
+					{
+						"source": {
+							"table": "landing_tables"
+						},
+						"destination": {
+							"fileName": "dbolanding_tables.csv"
+						}
+					},
+					{
+						"source": {
+							"table": "Mine"
+						},
+						"destination": {
+							"fileName": "dboMine.csv"
+						}
+					},
+					{
+						"source": {
+							"table": "Producto"
+						},
+						"destination": {
+							"fileName": "dboProducto.csv"
+						}
+					},
+					{
+						"source": {
+							"table": "SubCategoria"
+						},
+						"destination": {
+							"fileName": "dboSubCategoria.csv"
+						}
+					},
+					{
+						"source": {
+							"table": "Sucursales"
+						},
+						"destination": {
+							"fileName": "dboSucursales.csv"
+						}
+					},
+					{
+						"source": {
+							"table": "VentasInternet"
+						},
+						"destination": {
+							"fileName": "dboVentasInternet.csv"
+						}
+					}
+				]
+			}
+		},
+		"variables": {
+			"parametro": {
+				"type": "Array"
+			},
+			"variables": {
+				"type": "Array"
+			},
+			"lista": {
+				"type": "Array"
+			},
+			"cadena_archivos": {
+				"type": "String"
+			}
+		},
+		"annotations": [],
+		"lastPublishTime": "2022-11-15T23:18:54Z"
+	},
+	"type": "Microsoft.DataFactory/factories/pipelines"
+}
