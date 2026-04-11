@@ -1,4 +1,7 @@
 
-/cicd-etl/job/tasks/ScalaETL/project
-/cicd-etl/job/tasks/ScalaETL/target
-/cicd-etl/job/tasks/ScalaETL/.bsp
+/transformation/spark-jobs/pipelines/batch-etl-scala/project
+/transformation/spark-jobs/pipelines/batch-etl-scala/target
+/transformation/spark-jobs/pipelines/batch-etl-scala/datalake
+/transformation/spark-jobs/pipelines/batch-etl-scala/spark-warehouse
+/transformation/spark-jobs/pipelines/batch-etl-scala/.bsp
+/transformation/spark-jobs/pipelines/batch-etl-scala/.bsp
