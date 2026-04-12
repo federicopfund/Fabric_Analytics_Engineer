@@ -1,0 +1,25 @@
+{
+  "run_id": "20260412_141340",
+  "timestamp": "2026-04-12T14:13:40.440999+00:00",
+  "status": "DRY-RUN",
+  "total_duration_s": 0.0,
+  "layers_executed": 0,
+  "layers_total": 3,
+  "results": [
+    {
+      "notebook": "01_bronze_layer",
+      "status": "DRY-RUN",
+      "duration_s": 0
+    },
+    {
+      "notebook": "02_silver_layer",
+      "status": "DRY-RUN",
+      "duration_s": 0
+    },
+    {
+      "notebook": "03_gold_layer",
+      "status": "DRY-RUN",
+      "duration_s": 0
+    }
+  ]
+}
