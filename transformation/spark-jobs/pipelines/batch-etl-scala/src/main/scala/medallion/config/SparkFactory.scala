@@ -33,7 +33,7 @@ object SparkFactory {
             val warehouseDir = new java.io.File("./spark-warehouse").getCanonicalPath
             builder = builder
               .config("spark.sql.warehouse.dir", warehouseDir)
-              .enableHiveSupport()
+              .config("spark.sql.catalogImplementation", "in-memory")
           } else {
             val hdfsUri = sys.env.getOrElse("HDFS_URI", "hdfs://namenode:9000")
             builder = builder
