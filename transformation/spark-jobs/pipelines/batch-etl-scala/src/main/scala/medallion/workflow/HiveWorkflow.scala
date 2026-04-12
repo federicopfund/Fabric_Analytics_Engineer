@@ -86,13 +86,48 @@ object HiveWorkflow {
 
   def main(args: Array[String]): Unit = {
     val hdfsUri = sys.env.getOrElse("HDFS_URI", "hdfs://namenode:9000")
+
+    // Verificar disponibilidad de HDFS antes de iniciar sesión Hive
+    if (!medallion.infra.HdfsManager.isAvailable(hdfsUri)) {
+      println()
+      println("╔══════════════════════════════════════════════════════════════╗")
+      println("║  ⚠ HIVE AUDIT — HDFS no disponible                         ║")
+      println(s"║  URI: $hdfsUri")                                 
+      println("║  HiveWorkflow requiere HDFS + Hive Metastore activos.       ║")
+      println("║  Asegurate de ejecutar el entorno Hadoop antes:             ║")
+      println("║    docker-compose up -d (infrastructure/hadoop/)            ║")
+      println("╚══════════════════════════════════════════════════════════════╝")
+      return
+    }
+
     val basePath = s"$hdfsUri/hive/warehouse/datalake"
-    val spark = SparkSession.builder().appName("Hive-Audit").master("local[*]")
-      .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-      .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-      .config("spark.hadoop.fs.defaultFS", hdfsUri)
-      .config("hive.metastore.uris", sys.env.getOrElse("HIVE_METASTORE_URI", "thrift://hive-metastore:9083"))
-      .enableHiveSupport().getOrCreate()
+    val hiveMetastoreUri = sys.env.getOrElse("HIVE_METASTORE_URI", "thrift://hive-metastore:9083")
+    val spark = try {
+      SparkSession.builder().appName("Hive-Audit").master("local[*]")
+        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        .config("spark.hadoop.fs.defaultFS", hdfsUri)
+        .config("hive.metastore.uris", hiveMetastoreUri)
+        .enableHiveSupport().getOrCreate()
+    } catch {
+      case e: Exception =>
+        println()
+        println("╔══════════════════════════════════════════════════════════════╗")
+        println("║  ✗ ERROR — No se pudo inicializar Hive Metastore            ║")
+        println("╚══════════════════════════════════════════════════════════════╝")
+        val rootCause = Option(e.getCause).getOrElse(e)
+        if (rootCause.isInstanceOf[ClassCastException] &&
+            rootCause.getMessage.contains("URLClassLoader")) {
+          println("  Causa: Incompatibilidad Hive 3.x con JDK 11+")
+          println("  Solución: Ejecutar con JDK 8, o agregar JVM flags:")
+          println("    --add-opens java.base/java.net=ALL-UNNAMED")
+          println("    --add-opens java.base/java.lang=ALL-UNNAMED")
+        } else {
+          println(s"  Causa: ${rootCause.getMessage}")
+        }
+        println(s"  Hive Metastore URI: $hiveMetastoreUri")
+        return
+    }
     try { run(spark, basePath, hdfsUri) } finally { spark.stop() }
   }
 }
