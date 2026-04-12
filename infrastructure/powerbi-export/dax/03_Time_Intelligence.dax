@@ -1,0 +1,121 @@
+-- ════════════════════════════════════════════════════════════════════════════
+-- TIME INTELLIGENCE — VARIACIONES TEMPORALES
+-- Requiere: Tabla Calendario vinculada a fact_ventas[fecha_orden]
+-- ════════════════════════════════════════════════════════════════════════════
+
+DEFINE
+
+    -- Dependencias base
+    MEASURE fact_ventas[Ingreso Bruto] =
+        SUM( fact_ventas[ingreso_bruto] )
+
+    MEASURE fact_ventas[Margen Bruto] =
+        SUM( fact_ventas[margen_bruto] )
+
+    MEASURE fact_ventas[Ganancia Neta] =
+        SUM( fact_ventas[ganancia_neta] )
+
+    MEASURE fact_ventas[Total Ordenes] =
+        DISTINCTCOUNT( fact_ventas[orden_id] )
+
+    -- ── MoM ───────────────────────────────────────────────────────────────
+
+    -- Ingreso Mes Anterior
+    MEASURE fact_ventas[Ingreso Mes Anterior] =
+        CALCULATE(
+            [Ingreso Bruto],
+            DATEADD( Calendario[Date], -1, MONTH )
+        )
+
+    -- Variación MoM (%)
+    MEASURE fact_ventas[Variacion MoM Pct] =
+        VAR _actual   = [Ingreso Bruto]
+        VAR _anterior = [Ingreso Mes Anterior]
+        RETURN
+            DIVIDE( _actual - _anterior, _anterior, BLANK() )
+
+    -- Margen Mes Anterior
+    MEASURE fact_ventas[Margen Mes Anterior] =
+        CALCULATE(
+            [Margen Bruto],
+            DATEADD( Calendario[Date], -1, MONTH )
+        )
+
+    -- Variación Margen MoM (%)
+    MEASURE fact_ventas[Variacion Margen MoM Pct] =
+        VAR _actual   = [Margen Bruto]
+        VAR _anterior = [Margen Mes Anterior]
+        RETURN
+            DIVIDE( _actual - _anterior, _anterior, BLANK() )
+
+    -- Órdenes Mes Anterior
+    MEASURE fact_ventas[Ordenes Mes Anterior] =
+        CALCULATE(
+            [Total Ordenes],
+            DATEADD( Calendario[Date], -1, MONTH )
+        )
+
+    -- Variación Órdenes MoM (%)
+    MEASURE fact_ventas[Variacion Ordenes MoM Pct] =
+        VAR _actual   = [Total Ordenes]
+        VAR _anterior = [Ordenes Mes Anterior]
+        RETURN
+            DIVIDE( _actual - _anterior, _anterior, BLANK() )
+
+    -- ── YoY ───────────────────────────────────────────────────────────────
+
+    -- Ingreso Año Anterior (mismo período)
+    MEASURE fact_ventas[Ingreso Anio Anterior] =
+        CALCULATE(
+            [Ingreso Bruto],
+            DATEADD( Calendario[Date], -1, YEAR )
+        )
+
+    -- Variación YoY (%)
+    MEASURE fact_ventas[Variacion YoY Pct] =
+        VAR _actual   = [Ingreso Bruto]
+        VAR _anterior = [Ingreso Anio Anterior]
+        RETURN
+            DIVIDE( _actual - _anterior, _anterior, BLANK() )
+
+    -- ── Acumulados ────────────────────────────────────────────────────────
+
+    -- YTD Ingreso Bruto
+    MEASURE fact_ventas[Ingreso YTD] =
+        CALCULATE(
+            [Ingreso Bruto],
+            DATESYTD( Calendario[Date] )
+        )
+
+    -- YTD Margen Bruto
+    MEASURE fact_ventas[Margen YTD] =
+        CALCULATE(
+            [Margen Bruto],
+            DATESYTD( Calendario[Date] )
+        )
+
+    -- YTD Ganancia Neta
+    MEASURE fact_ventas[Ganancia Neta YTD] =
+        CALCULATE(
+            [Ganancia Neta],
+            DATESYTD( Calendario[Date] )
+        )
+
+    -- QTD Ingreso Bruto
+    MEASURE fact_ventas[Ingreso QTD] =
+        CALCULATE(
+            [Ingreso Bruto],
+            DATESQTD( Calendario[Date] )
+        )
+
+    -- ── Media Móvil ──────────────────────────────────────────────────────
+
+    -- Media Móvil 3 Meses (Ingreso)
+    MEASURE fact_ventas[Media Movil 3M Ingreso] =
+        CALCULATE(
+            [Ingreso Bruto],
+            DATESINPERIOD( Calendario[Date], MAX( Calendario[Date] ), -3, MONTH )
+        ) / 3
+
+EVALUATE
+ROW( "Validacion", "Time Intelligence OK" )
