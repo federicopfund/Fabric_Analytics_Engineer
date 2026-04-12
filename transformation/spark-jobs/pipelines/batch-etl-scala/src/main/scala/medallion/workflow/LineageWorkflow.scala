@@ -3,6 +3,7 @@ package medallion.workflow
 import org.apache.spark.sql.SparkSession
 import org.apache.log4j.Logger
 import medallion.infra.DataLakeIO
+import medallion.config.TableRegistry
 
 /**
  * WORKFLOW 5: Lineage — Trazabilidad de datos del pipeline.
@@ -29,34 +30,15 @@ object LineageWorkflow {
     timestamp: String
   )
 
-  // Mapeo de fuentes por tabla (conocimiento del pipeline)
-  private val BRONZE_SOURCES: Map[String, Seq[String]] = Map(
-    "categoria" -> Seq("raw/Categoria.csv"), "subcategoria" -> Seq("raw/Subcategoria.csv"),
-    "producto" -> Seq("raw/Producto.csv"), "ventasinternet" -> Seq("raw/VentasInternet.csv"),
-    "sucursales" -> Seq("raw/Sucursales.csv"), "factmine" -> Seq("raw/FactMine.csv"),
-    "mine" -> Seq("raw/Mine.csv")
-  )
-
-  private val SILVER_SOURCES: Map[String, Seq[String]] = Map(
-    "catalogo_productos" -> Seq("bronze/producto", "bronze/subcategoria", "bronze/categoria"),
-    "ventas_enriquecidas" -> Seq("bronze/ventasinternet", "bronze/producto", "bronze/subcategoria", "bronze/categoria"),
-    "resumen_ventas_mensuales" -> Seq("bronze/ventasinternet", "bronze/producto", "bronze/subcategoria", "bronze/categoria"),
-    "rentabilidad_producto" -> Seq("bronze/ventasinternet", "bronze/producto", "bronze/subcategoria", "bronze/categoria"),
-    "segmentacion_clientes" -> Seq("bronze/ventasinternet"),
-    "produccion_operador" -> Seq("bronze/mine"),
-    "eficiencia_minera" -> Seq("bronze/factmine"),
-    "produccion_por_pais" -> Seq("bronze/mine")
-  )
-
-  private val GOLD_SOURCES: Map[String, Seq[String]] = Map(
-    "dim_producto" -> Seq("silver/catalogo_productos", "silver/rentabilidad_producto"),
-    "dim_cliente" -> Seq("silver/segmentacion_clientes"),
-    "fact_ventas" -> Seq("silver/ventas_enriquecidas", "silver/segmentacion_clientes"),
-    "kpi_ventas_mensuales" -> Seq("silver/resumen_ventas_mensuales"),
-    "dim_operador" -> Seq("silver/produccion_operador"),
-    "fact_produccion_minera" -> Seq("silver/eficiencia_minera", "silver/produccion_por_pais"),
-    "kpi_mineria" -> Seq("silver/produccion_por_pais")
-  )
+  // Mapeo de fuentes por tabla desde TableRegistry (fuente única de verdad)
+  private def sourcesMapFor(layerName: String): Map[String, Seq[String]] = {
+    layerName.toUpperCase match {
+      case "BRONZE" => TableRegistry.sourcesMap(TableRegistry.Bronze)
+      case "SILVER" => TableRegistry.sourcesMap(TableRegistry.Silver)
+      case "GOLD"   => TableRegistry.sourcesMap(TableRegistry.Gold)
+      case _        => Map.empty[String, Seq[String]]
+    }
+  }
 
   /** Captura el linaje de una capa completa */
   def captureLayerLineage(
@@ -67,12 +49,7 @@ object LineageWorkflow {
     format: String
   ): Seq[LineageRecord] = {
     val timestamp = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss").format(new java.util.Date())
-    val sourcesMap = layerName.toUpperCase match {
-      case "BRONZE" => BRONZE_SOURCES
-      case "SILVER" => SILVER_SOURCES
-      case "GOLD"   => GOLD_SOURCES
-      case _        => Map.empty[String, Seq[String]]
-    }
+    val sourcesMap = sourcesMapFor(layerName)
 
     println(s"  ╔═══ LINEAGE: $layerName ═══╗")
 
