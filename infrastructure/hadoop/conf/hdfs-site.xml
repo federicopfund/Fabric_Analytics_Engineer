@@ -1,111 +1,84 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
+    <!-- ============================================================ -->
+    <!-- HDFS-SITE — Hadoop 3.3.4 Lakehouse Configuration            -->
+    <!-- ============================================================ -->
 
-    <!-- Configuración del directorio de almacenamiento de metadatos adicional -->
+    <!-- Replication — single node for dev -->
     <property>
-        <name>dfs.namenode.edits.dir</name>
-        <value>/opt/hadoop/edits</value>
+        <name>dfs.replication</name>
+        <value>1</value>
     </property>
 
+    <!-- NameNode storage -->
+    <property>
+        <name>dfs.namenode.name.dir</name>
+        <value>file:///hadoop/dfs/name</value>
+    </property>
+
+    <!-- DataNode storage -->
     <property>
         <name>dfs.datanode.data.dir</name>
-        <value>/path/to/datanode/data</value>
+        <value>file:///hadoop/dfs/data</value>
     </property>
 
+    <!-- NameNode edits -->
+    <property>
+        <name>dfs.namenode.edits.dir</name>
+        <value>file:///hadoop/dfs/name</value>
+    </property>
+
+    <!-- WebHDFS -->
+    <property>
+        <name>dfs.webhdfs.enabled</name>
+        <value>true</value>
+    </property>
+
+    <!-- Permissions -->
     <property>
         <name>dfs.permissions.superusergroup</name>
         <value>hadoop</value>
     </property>
+    <property>
+        <name>dfs.permissions.enabled</name>
+        <value>false</value>
+    </property>
 
-    <!-- Configuración para habilitar la compresión en HDFS -->
+    <!-- Data transfer -->
+    <property>
+        <name>dfs.client.use.datanode.hostname</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>dfs.datanode.use.datanode.hostname</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>dfs.datanode.hostname</name>
+        <value>localhost</value>
+    </property>
+
+    <!-- Block size: 128MB -->
+    <property>
+        <name>dfs.blocksize</name>
+        <value>134217728</value>
+    </property>
+
+    <!-- NameNode handler threads -->
+    <property>
+        <name>dfs.namenode.handler.count</name>
+        <value>100</value>
+    </property>
+
+    <!-- Support append (needed for Delta Lake) -->
+    <property>
+        <name>dfs.support.append</name>
+        <value>true</value>
+    </property>
+
+    <!-- Compression -->
     <property>
         <name>dfs.compress.enabled</name>
         <value>true</value>
-    </property>
-
-    <!-- Configuración del tipo de compresión predeterminado -->
-    <property>
-        <name>dfs.compress.default</name>
-        <value>org.apache.hadoop.io.compress.DefaultCodec</value>
-    </property>
-
-    <!-- Configuración para habilitar el modo seguro en HDFS -->
-    <property>
-        <name>dfs.webhdfs.enabled</name>
-        <value>true</value>
-    </property>
-
-    <!-- Configuración del puerto de servicio WebHDFS -->
-    <property>
-        <name>dfs.webhdfs.listen.address</name>
-        <value>0.0.0.0:50070</value>
-    </property>
-
-    <!-- Configuración para habilitar la replicación entre clústeres (Hadoop Federation) -->
-    <property>
-        <name>dfs.federation.nameservices</name>
-        <value>cluster1</value>
-    </property>
-
-    <!-- Configuración para la dirección del ResourceManager -->
-    <property>
-        <name>yarn.resourcemanager.hostname</name>
-        <value>resourcemanager</value>
-    </property>
-
-    <!-- Habilitar el servicio WebHDFS -->
-    <property>
-        <name>dfs.webhdfs.enabled</name>
-        <value>true</value>
-    </property>
-
-    <!-- Configuración del puerto del servicio WebHDFS -->
-    <property>
-        <name>dfs.webhdfs.port</name>
-        <value>50070</value>
-    </property>
-
-    <!-- Habilitar CORS para permitir solicitudes desde la web -->
-    <property>
-        <name>dfs.webhdfs.enable.cors</name>
-        <value>true</value>
-    </property>
-
-    <!-- Configuración de los orígenes permitidos (ajusta según tus necesidades) -->
-    <property>
-        <name>dfs.webhdfs.enable.cors-origins</name>
-        <value>*</value>
-    </property>
-
-    <!-- Configuración de los métodos HTTP permitidos -->
-    <property>
-        <name>dfs.webhdfs.enable.cors.methods</name>
-        <value>GET,POST,PUT,DELETE</value>
-    </property>
-
-    <!-- Configuración de los encabezados permitidos -->
-    <property>
-        <name>dfs.webhdfs.enable.cors.headers</name>
-        <value>Origin,Accept,X-Requested-With,Content-Type</value>
-    </property>
-
-    <!-- Configuración de las credenciales permitidas -->
-    <property>
-        <name>dfs.webhdfs.enable.cors.credentials</name>
-        <value>true</value>
-    </property>
-
-    <!-- Configuración de tamaño máximo para la carga de archivos -->
-    <property>
-        <name>dfs.webhdfs.enable.cors.max-age</name>
-        <value>1800</value>
-    </property>
-     <property>
-        <name>dfs.replication</name>
-        <value>1</value>
-    </property>
-    <property>
-        <name>dfs.namenode.name.dir</name>
-        <value>/path/to/namenode/directory</value>
     </property>
 </configuration>

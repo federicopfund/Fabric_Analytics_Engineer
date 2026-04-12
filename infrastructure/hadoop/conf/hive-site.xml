@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- ============================================================ -->
+    <!-- HIVE METASTORE — MySQL Backend                               -->
+    <!-- ============================================================ -->
+
+    <!-- Metastore Thrift URI -->
+    <property>
+        <name>hive.metastore.uris</name>
+        <value>thrift://hive-metastore:9083</value>
+    </property>
+
+    <!-- Warehouse directory in HDFS -->
+    <property>
+        <name>hive.metastore.warehouse.dir</name>
+        <value>hdfs://namenode:9000/hive/warehouse</value>
+    </property>
+
+    <!-- JDBC connection to MySQL -->
+    <property>
+        <name>javax.jdo.option.ConnectionURL</name>
+        <value>jdbc:mysql://hive-metastore-db:3306/metastore?createDatabaseIfNotExist=true&amp;useSSL=false</value>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionDriverName</name>
+        <value>com.mysql.jdbc.Driver</value>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionUserName</name>
+        <value>hive</value>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionPassword</name>
+        <value>hive_password</value>
+    </property>
+
+    <!-- Schema verification -->
+    <property>
+        <name>hive.metastore.schema.verification</name>
+        <value>false</value>
+    </property>
+    <property>
+        <name>datanucleus.schema.autoCreateAll</name>
+        <value>true</value>
+    </property>
+
+    <!-- ============================================================ -->
+    <!-- HIVE SERVER2 — JDBC / Beeline Configuration                 -->
+    <!-- ============================================================ -->
+
+    <property>
+        <name>hive.server2.thrift.port</name>
+        <value>10000</value>
+    </property>
+    <property>
+        <name>hive.server2.thrift.bind.host</name>
+        <value>0.0.0.0</value>
+    </property>
+    <property>
+        <name>hive.server2.enable.doAs</name>
+        <value>false</value>
+    </property>
+    <property>
+        <name>hive.server2.webui.port</name>
+        <value>10002</value>
+    </property>
+
+    <!-- ============================================================ -->
+    <!-- EXECUTION ENGINE                                             -->
+    <!-- ============================================================ -->
+
+    <property>
+        <name>hive.execution.engine</name>
+        <value>mr</value>
+    </property>
+
+    <!-- ============================================================ -->
+    <!-- PERFORMANCE / OPTIMIZATION                                   -->
+    <!-- ============================================================ -->
+
+    <property>
+        <name>hive.auto.convert.join</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>hive.vectorized.execution.enabled</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>hive.vectorized.execution.reduce.enabled</name>
+        <value>true</value>
+    </property>
+
+    <!-- Scratch directory -->
+    <property>
+        <name>hive.exec.scratchdir</name>
+        <value>hdfs://namenode:9000/tmp/hive</value>
+    </property>
+    <property>
+        <name>hive.exec.local.scratchdir</name>
+        <value>/tmp/hive/local</value>
+    </property>
+</configuration>
