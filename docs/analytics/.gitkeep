@@ -1,0 +1,10 @@
+# Analytics Charts Output Directory
+
+Los gráficos generados por STAGE 6 (BI Analytics) se almacenan aquí.
+
+Ejecutar pipeline para generar:
+```bash
+sbt "runMain main.MainETL"
+# o standalone:
+sbt "runMain main.AnalyticsRunner"
+```
