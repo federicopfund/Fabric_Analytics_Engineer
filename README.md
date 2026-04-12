@@ -114,7 +114,7 @@ El pipeline v3.0 implementa **ejecución paralela de workflows**, **retry con ba
 
 ```mermaid
 flowchart TB
-    START([spark-submit<br/>datalake.Pipeline]) --> DETECT{HDFS<br/>disponible?}
+    START([spark-submit<br/>medallion.Pipeline]) --> DETECT{HDFS<br/>disponible?}
 
     DETECT -->|Sí| HDFS["Modo HDFS + Hive<br/>setupHadoopEnvironment<br/>ingestRawData"]
     DETECT -->|No| LOCAL["Modo LOCAL<br/>initLocalDatalake<br/>copiar CSVs a raw/"]
@@ -479,7 +479,7 @@ data-engineer/
 ├── transformation/                  → Motor de procesamiento
 │   ├── spark-jobs/pipelines/
 │   │   ├── batch-etl-scala/         → Pipeline Medallion (Spark + Scala)
-│   │   │   └── src/main/scala/datalake/
+│   │   │   └── src/main/scala/medallion/
 │   │   │       ├── Pipeline.scala           → Entry point v3.0 (parallel + retry + checkpoint)
 │   │   │       ├── config/                  → DatalakeConfig, SparkFactory
 │   │   │       ├── infra/                   → DataLakeIO (MERGE/VACUUM), HdfsManager
@@ -522,7 +522,7 @@ data-engineer/
 | [`staging/`](staging/) | Zona de staging | CSVs intermedios de transformación |
 | [`staging/transform_csv/`](staging/transform_csv/) | CSVs transformados | 9 archivos de transformación |
 | [`transformation/`](transformation/) | Motor de transformación | Spark jobs, notebooks Databricks |
-| [`transformation/spark-jobs/pipelines/batch-etl-scala/`](transformation/spark-jobs/pipelines/batch-etl-scala/) | Pipeline Medallion principal | 18 archivos Scala bajo `datalake.*` — Bronze → Silver → Gold + 6 workflows (3 paralelos) + DAG engine |
+| [`transformation/spark-jobs/pipelines/batch-etl-scala/`](transformation/spark-jobs/pipelines/batch-etl-scala/) | Pipeline Medallion principal | 18 archivos Scala bajo `medallion.*` — Bronze → Silver → Gold + 6 workflows (3 paralelos) + DAG engine |
 | [`transformation/spark-jobs/pipelines/stream-processing/`](transformation/spark-jobs/pipelines/stream-processing/) | Procesamiento streaming | Spark Structured Streaming + Kafka |
 | [`transformation/spark-jobs/pipelines/iot-ingestion/`](transformation/spark-jobs/pipelines/iot-ingestion/) | Ingesta IoT | Producer Kafka para sensores |
 | [`transformation/notebooks/databricks/`](transformation/notebooks/databricks/) | Notebooks interactivos | Retail-client, Airbnb analytics |
@@ -617,10 +617,10 @@ graph LR
 
 ## Pipeline Medallion — Código Fuente
 
-El pipeline está modularizado bajo el paquete `datalake.*` con 7 sub-paquetes de responsabilidad única. La arquitectura sigue principios de **alta cohesión / bajo acoplamiento**, con ejecución paralela, retry y checkpoint:
+El pipeline está modularizado bajo el paquete `medallion.*` con 7 sub-paquetes de responsabilidad única. La arquitectura sigue principios de **alta cohesión / bajo acoplamiento**, con ejecución paralela, retry y checkpoint:
 
 ```
-src/main/scala/datalake/
+src/main/scala/medallion/
 ├── Pipeline.scala                       # Entry point v3.0 — parallel + retry + checkpoint
 ├── config/
 │   ├── DatalakeConfig.scala             # Modelo de configuración inmutable
@@ -650,24 +650,24 @@ src/main/scala/datalake/
 
 | Paquete | Archivo | Responsabilidad |
 |---------|---------|-----------------|
-| `datalake` | `Pipeline.scala` | Entry point v3.0: parallel workflows, retry con backoff, checkpoint, thread pool |
-| `datalake.config` | `DatalakeConfig.scala` | Case class inmutable con paths de todas las capas + lineage + metrics |
-| `datalake.config` | `SparkFactory.scala` | SparkSession singleton con Delta Lake Extensions + Kryo + tuning |
-| `datalake.infra` | `DataLakeIO.scala` | readCsv con schema, writeParquet coalesce(1), writeDelta, pathExists |
-| `datalake.infra` | `HdfsManager.scala` | buildHadoopConfiguration, createDatalakeStructure, uploadToRaw, validateDatalake |
-| `datalake.schema` | `CsvSchemas.scala` | StructType explícitos para las 7 tablas CSV fuente |
-| `datalake.layer` | `BronzeLayer.scala` | Schema enforcement, deduplicación por claves, filtro de nulos, columnas de auditoría |
-| `datalake.layer` | `SilverLayer.scala` | Joins, cálculos financieros, RFM, eficiencia minera, segmentación |
-| `datalake.layer` | `GoldLayer.scala` | Star Schema: dim_producto, dim_cliente, dim_operador, fact_ventas, fact_produccion_minera, KPIs |
-| `datalake.analytics` | `BIChartGenerator.scala` | Generación headless de 10 gráficos PNG con JFreeChart 1.5.4 |
-| `datalake.engine` | `DagTask.scala` | Modelo declarativo: task ID, dependencias, bloque de ejecución, retry count |
-| `datalake.engine` | `DagExecutor.scala` | Motor DAG: paralelismo por thread pool, cycle detection, retry con backoff, checkpoint |
-| `datalake.workflow` | `EtlWorkflow.scala` | WF1: Setup → Ingest → Bronze(7) → Silver(8) → Gold(7) → Hive Catalog |
-| `datalake.workflow` | `AnalyticsWorkflow.scala` | WF2: Lee Gold/Silver → genera 10 visualizaciones PNG |
-| `datalake.workflow` | `HiveWorkflow.scala` | WF3: Auditoría completa — schema, preview, conteo por capa |
-| `datalake.workflow` | `DataQualityWorkflow.scala` | WF4: Validación de nulls, duplicados, schema conformance, quality score A+/A/B/C/D |
-| `datalake.workflow` | `LineageWorkflow.scala` | WF5: Captura source→target por tabla, exporta manifest JSON a `datalake/lineage/` |
-| `datalake.workflow` | `MetricsWorkflow.scala` | WF6: Thread-safe (ConcurrentHashMap). Timing, throughput, JVM, parallel detection, JSON export |
+| `medallion` | `Pipeline.scala` | Entry point v3.0: parallel workflows, retry con backoff, checkpoint, thread pool |
+| `medallion.config` | `DatalakeConfig.scala` | Case class inmutable con paths de todas las capas + lineage + metrics |
+| `medallion.config` | `SparkFactory.scala` | SparkSession singleton con Delta Lake Extensions + Kryo + tuning |
+| `medallion.infra` | `DataLakeIO.scala` | readCsv con schema, writeParquet coalesce(1), writeDelta, pathExists |
+| `medallion.infra` | `HdfsManager.scala` | buildHadoopConfiguration, createDatalakeStructure, uploadToRaw, validateDatalake |
+| `medallion.schema` | `CsvSchemas.scala` | StructType explícitos para las 7 tablas CSV fuente |
+| `medallion.layer` | `BronzeLayer.scala` | Schema enforcement, deduplicación por claves, filtro de nulos, columnas de auditoría |
+| `medallion.layer` | `SilverLayer.scala` | Joins, cálculos financieros, RFM, eficiencia minera, segmentación |
+| `medallion.layer` | `GoldLayer.scala` | Star Schema: dim_producto, dim_cliente, dim_operador, fact_ventas, fact_produccion_minera, KPIs |
+| `medallion.analytics` | `BIChartGenerator.scala` | Generación headless de 10 gráficos PNG con JFreeChart 1.5.4 |
+| `medallion.engine` | `DagTask.scala` | Modelo declarativo: task ID, dependencias, bloque de ejecución, retry count |
+| `medallion.engine` | `DagExecutor.scala` | Motor DAG: paralelismo por thread pool, cycle detection, retry con backoff, checkpoint |
+| `medallion.workflow` | `EtlWorkflow.scala` | WF1: Setup → Ingest → Bronze(7) → Silver(8) → Gold(7) → Hive Catalog |
+| `medallion.workflow` | `AnalyticsWorkflow.scala` | WF2: Lee Gold/Silver → genera 10 visualizaciones PNG |
+| `medallion.workflow` | `HiveWorkflow.scala` | WF3: Auditoría completa — schema, preview, conteo por capa |
+| `medallion.workflow` | `DataQualityWorkflow.scala` | WF4: Validación de nulls, duplicados, schema conformance, quality score A+/A/B/C/D |
+| `medallion.workflow` | `LineageWorkflow.scala` | WF5: Captura source→target por tabla, exporta manifest JSON a `datalake/lineage/` |
+| `medallion.workflow` | `MetricsWorkflow.scala` | WF6: Thread-safe (ConcurrentHashMap). Timing, throughput, JVM, parallel detection, JSON export |
 
 ---
 
@@ -685,7 +685,7 @@ sbt compile
 sbt assembly
 
 # Ejecutar pipeline completo (6 workflows — 3 paralelos)
-sbt "runMain datalake.Pipeline"
+sbt "runMain medallion.Pipeline"
 ```
 
 ### Modo 2 — Lakehouse completo (HDFS + Hive)
@@ -699,7 +699,7 @@ docker-compose up -d
 cd ../../transformation/spark-jobs/pipelines/batch-etl-scala
 export HDFS_URI="hdfs://localhost:9000"
 export HIVE_METASTORE_URI="thrift://localhost:9083"
-sbt "runMain datalake.Pipeline"
+sbt "runMain medallion.Pipeline"
 
 ```
 ```SQL
@@ -761,7 +761,7 @@ bash lakehouse-start.sh
 
 ```bash
 spark-submit \
-  --class datalake.Pipeline \
+  --class medallion.Pipeline \
   --master "local[*]" \
   --packages io.delta:delta-core_2.12:2.2.0 \
   target/scala-2.12/root-assembly-1.0.0.jar
