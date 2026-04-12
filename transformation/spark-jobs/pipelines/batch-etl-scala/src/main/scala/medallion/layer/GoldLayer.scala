@@ -3,12 +3,17 @@ package medallion.layer
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
 import org.apache.log4j.Logger
-import medallion.infra.DataLakeIO
+import medallion.infra.{DataLakeIO, ViewScope}
+import medallion.config.TableRegistry
 
 /**
  * GOLD LAYER — Modelos dimensionales Star Schema y KPIs para BI.
  * Produce tablas Delta Lake optimizadas para consumo analítico.
- * Carga incremental de vistas Silver para evitar OOM.
+ *
+ * Mejoras v4:
+ *   - ViewScope loan pattern para gestión automática de vistas Silver
+ *   - Eliminado freeMemory()/System.gc() manual (8 instancias)
+ *   - TableRegistry como fuente de nombres de tablas
  */
 object GoldLayer {
 
@@ -19,76 +24,21 @@ object GoldLayer {
     logger.info("  GOLD LAYER — BI & Analytics Models")
     logger.info("═══════════════════════════════════════")
 
-    // --- RETAIL DOMAIN (carga incremental) ---
-    registerSilverTables(spark, silverPath, Seq("catalogo_productos", "rentabilidad_producto"))
-    buildDimProducto(spark, goldPath)
-    freeMemory(spark)
+    // Registrar todas las vistas Silver de una vez con loan pattern
+    ViewScope.withSilverViews(spark, silverPath, TableRegistry.silverNames) {
+      // --- RETAIL DOMAIN ---
+      buildDimProducto(spark, goldPath)
+      buildDimCliente(spark, goldPath)
+      buildFactVentas(spark, goldPath)
+      buildKpiVentasMensuales(spark, goldPath)
 
-    registerSilverTables(spark, silverPath, Seq("segmentacion_clientes"))
-    buildDimCliente(spark, goldPath)
-    freeMemory(spark)
-
-    registerSilverTables(spark, silverPath, Seq("ventas_enriquecidas"))
-    buildFactVentas(spark, goldPath)
-    freeMemory(spark)
-
-    registerSilverTables(spark, silverPath, Seq("resumen_ventas_mensuales"))
-    buildKpiVentasMensuales(spark, goldPath)
-    freeMemory(spark)
-
-    dropSilverViews(spark)
-
-    // --- MINING DOMAIN ---
-    registerSilverTables(spark, silverPath, Seq("produccion_operador"))
-    buildDimOperador(spark, goldPath)
-    freeMemory(spark)
-
-    registerSilverTables(spark, silverPath, Seq("eficiencia_minera", "produccion_por_pais"))
-    buildFactProduccionMinera(spark, goldPath)
-    freeMemory(spark)
-
-    registerSilverTables(spark, silverPath, Seq("produccion_por_pais"))
-    buildKpiMineria(spark, goldPath)
-    freeMemory(spark)
-
-    dropSilverViews(spark)
+      // --- MINING DOMAIN ---
+      buildDimOperador(spark, goldPath)
+      buildFactProduccionMinera(spark, goldPath)
+      buildKpiMineria(spark, goldPath)
+    }
 
     logger.info("✔ GOLD LAYER completada")
-  }
-
-  private def freeMemory(spark: SparkSession): Unit = {
-    spark.catalog.clearCache()
-    System.gc()
-  }
-
-  private def dropSilverViews(spark: SparkSession): Unit = {
-    val views = Seq(
-      "silver_catalogo_productos", "silver_ventas_enriquecidas", "silver_resumen_ventas_mensuales",
-      "silver_rentabilidad_producto", "silver_segmentacion_clientes",
-      "silver_produccion_operador", "silver_eficiencia_minera", "silver_produccion_por_pais"
-    )
-    views.foreach { v =>
-      try { spark.catalog.dropTempView(v) } catch { case _: Exception => () }
-    }
-    spark.catalog.clearCache()
-    System.gc()
-    logger.info("  ✔ Silver temp views liberadas")
-  }
-
-  private def registerSilverTables(spark: SparkSession, silverPath: String, tables: Seq[String]): Unit = {
-    tables.foreach { table =>
-      val viewName = s"silver_$table"
-      val exists = try { spark.catalog.tableExists(viewName) } catch { case _: Exception => false }
-      if (!exists) {
-        val path = s"$silverPath/$table"
-        if (DataLakeIO.pathExists(path)) {
-          spark.read.parquet(path).createOrReplaceTempView(viewName)
-          logger.info(s"  ✓ Vista registrada: $viewName")
-        } else {
-          logger.warn(s"  ✗ Tabla silver no encontrada: $table")
-        }
-      }
-    }
   }
 
   private def buildDimProducto(spark: SparkSession, goldPath: String): Unit = {
