@@ -16,8 +16,24 @@ case "$HOSTNAME" in
     fi
     hdfs namenode &
 
-    # Wait for NameNode to be ready, then create datalake structure
+    # Wait for NameNode to be ready and leave safe mode
+    echo ">>> Waiting for NameNode to start..."
     sleep 10
+
+    echo ">>> Waiting for NameNode to leave safe mode..."
+    for i in $(seq 1 30); do
+      SAFEMODE=$(hdfs dfsadmin -safemode get 2>/dev/null || echo "unknown")
+      if echo "$SAFEMODE" | grep -q "OFF"; then
+        echo ">>> NameNode left safe mode after ~$((10 + i * 2))s"
+        break
+      fi
+      if [ "$i" -eq 30 ]; then
+        echo ">>> Safe mode timeout — forcing leave..."
+        hdfs dfsadmin -safemode leave || true
+      fi
+      sleep 2
+    done
+
     echo ">>> Creating Datalake directories in HDFS..."
     hdfs dfs -mkdir -p /hive/warehouse/datalake/raw
     hdfs dfs -mkdir -p /hive/warehouse/datalake/bronze
@@ -46,16 +62,6 @@ case "$HOSTNAME" in
   datanode)
     echo ">>> Starting DataNode..."
     hdfs datanode &
-    wait
-    ;;
-  resourcemanager)
-    echo ">>> Starting ResourceManager..."
-    yarn resourcemanager &
-    wait
-    ;;
-  nodemanager)
-    echo ">>> Starting NodeManager..."
-    yarn nodemanager &
     wait
     ;;
   *)
