@@ -1,0 +1,77 @@
+-- ════════════════════════════════════════════════════════════════════════════
+-- MEDIDAS DE CLIENTE
+-- Segmentación RFM, LTV, retención y comportamiento
+-- ════════════════════════════════════════════════════════════════════════════
+
+DEFINE
+
+    MEASURE fact_ventas[Ingreso Bruto] =
+        SUM( fact_ventas[ingreso_bruto] )
+
+    MEASURE fact_ventas[Total Ordenes] =
+        DISTINCTCOUNT( fact_ventas[orden_id] )
+
+    MEASURE fact_ventas[Clientes Unicos] =
+        DISTINCTCOUNT( fact_ventas[cliente_key] )
+
+    MEASURE fact_ventas[Ticket Promedio] =
+        DIVIDE( [Ingreso Bruto], [Total Ordenes], 0 )
+
+    -- Clientes Premium (%)
+    MEASURE fact_ventas[Pct Clientes Premium] =
+        DIVIDE(
+            CALCULATE(
+                DISTINCTCOUNT( fact_ventas[cliente_key] ),
+                fact_ventas[segmento_cliente] = "Premium"
+            ),
+            [Clientes Unicos],
+            0
+        )
+
+    -- Ingreso por Segmento (% participación)
+    MEASURE fact_ventas[Pct Ingreso Segmento] =
+        DIVIDE(
+            [Ingreso Bruto],
+            CALCULATE( [Ingreso Bruto], ALL( fact_ventas[segmento_cliente] ) ),
+            0
+        )
+
+    -- Ticket Promedio Premium
+    MEASURE fact_ventas[Ticket Promedio Premium] =
+        CALCULATE(
+            [Ticket Promedio],
+            fact_ventas[segmento_cliente] = "Premium"
+        )
+
+    -- Frecuencia de Compra Promedio
+    MEASURE dim_cliente[Frecuencia Compra Promedio] =
+        AVERAGE( dim_cliente[frecuencia_compras] )
+
+    -- LTV Anualizado Promedio
+    MEASURE dim_cliente[LTV Anualizado Promedio] =
+        AVERAGE( dim_cliente[ltv_anualizado] )
+
+    -- Score Monetario Promedio
+    MEASURE dim_cliente[Score Monetario Promedio] =
+        AVERAGE( dim_cliente[score_monetario] )
+
+    -- Tasa de Retención (clientes con >1 compra)
+    MEASURE fact_ventas[Tasa Retencion] =
+        DIVIDE(
+            CALCULATE(
+                DISTINCTCOUNT( fact_ventas[cliente_key] ),
+                FILTER(
+                    VALUES( fact_ventas[cliente_key] ),
+                    CALCULATE( DISTINCTCOUNT( fact_ventas[orden_id] ) ) > 1
+                )
+            ),
+            [Clientes Unicos],
+            0
+        )
+
+    -- Antigüedad Promedio (días)
+    MEASURE dim_cliente[Antiguedad Promedio Dias] =
+        AVERAGE( dim_cliente[antiguedad_dias] )
+
+EVALUATE
+ROW( "Validacion", "Medidas Cliente OK" )
