@@ -2,6 +2,7 @@ package medallion.workflow
 
 import org.apache.spark.sql.SparkSession
 import org.apache.log4j.Logger
+import medallion.config.TableRegistry
 
 /**
  * WORKFLOW 3: Hive Audit — Verificación de tablas Delta en catálogo Hive.
@@ -31,7 +32,7 @@ object HiveWorkflow {
     hiveTables.toSeq.sorted.foreach(t => println(s"    ├── $t"))
     println()
 
-    val goldTables = Seq("dim_producto", "dim_cliente", "fact_ventas", "kpi_ventas_mensuales", "dim_operador", "fact_produccion_minera", "kpi_mineria")
+    val goldTables = TableRegistry.goldNames
     println("  ═══ GOLD LAYER — Delta Tables ═══")
     println(s"  Esperadas: ${goldTables.length}")
     println()
@@ -59,7 +60,7 @@ object HiveWorkflow {
     println(s"  ─── GOLD: $goldOk/${goldTables.length} OK  |  $goldFail errores ───")
     println()
 
-    val silverTables = Seq("catalogo_productos", "ventas_enriquecidas", "resumen_ventas_mensuales", "rentabilidad_producto", "segmentacion_clientes", "produccion_operador", "eficiencia_minera", "produccion_por_pais")
+    val silverTables = TableRegistry.silverNames
     println("  ═══ SILVER LAYER — Parquet Tables ═══")
     var silverOk = 0; var silverFail = 0
     silverTables.foreach { table =>
