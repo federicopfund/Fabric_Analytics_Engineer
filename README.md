@@ -1,5 +1,48 @@
 # Fabric Analytics Engineer — Lakehouse Medallion Architecture
 
+---
+
+## Índice de Contenidos
+
+1. [Idea de Negocio](#idea-de-negocio)
+2. [Definición de Business Intelligence](#definición-de-business-intelligence)
+   - [Dashboard Ejecutivo — Retail](#dashboard-ejecutivo--retail)
+   - [Dashboard Ejecutivo — Mining](#dashboard-ejecutivo--mining)
+   - [Análisis Operativo (Self-Service)](#análisis-operativo-self-service)
+3. [Arquitectura Lakehouse](#arquitectura-lakehouse)
+4. [Pipeline de Procesamiento — Workflow Paralelizable v3.0](#pipeline-de-procesamiento--workflow-paralelizable-v30)
+   - [Estrategia de Paralelización](#estrategia-de-paralelización)
+   - [Ejecución Paralela de Workflows (v3.0)](#ejecución-paralela-de-workflows-v30)
+   - [Arquitectura HDFS — Datalake Distribuido](#arquitectura-hdfs--datalake-distribuido)
+5. [Capas del Lakehouse — Detalle](#capas-del-lakehouse--detalle)
+   - [RAW — Zona de Ingesta](#raw--zona-de-ingesta)
+   - [BRONZE — Data Cleansing (Parquet)](#bronze--data-cleansing-parquet)
+   - [SILVER — Business Logic (Parquet)](#silver--business-logic-parquet)
+   - [GOLD — BI & Analytics Models (Delta Lake)](#gold--bi--analytics-models-delta-lake)
+6. [Dominios de Datos](#dominios-de-datos)
+7. [Modelo de Datos](#modelo-de-datos)
+8. [Estructura del Proyecto](#estructura-del-proyecto)
+   - [Navegación Rápida por Directorio](#navegación-rápida-por-directorio)
+9. [Stack Tecnológico](#stack-tecnológico)
+10. [Pipeline Medallion — Código Fuente (Scala)](#pipeline-medallion--código-fuente)
+11. [Pipeline Medallion — Notebooks IBM Cloud (PySpark)](#pipeline-medallion--notebooks-ibm-cloud-pyspark)
+12. [Infraestructura IBM Cloud — CI/CD y Terraform](#infraestructura-ibm-cloud--cicd-y-terraform)
+13. [Ejecución](#ejecución)
+    - [Modo 1 — Local (sin infraestructura)](#modo-1--local-sin-infraestructura)
+    - [Modo 2 — Lakehouse completo (HDFS + Hive)](#modo-2--lakehouse-completo-hdfs--hive)
+    - [Modo 3 — Script E2E automatizado](#modo-3--script-e2e-automatizado)
+    - [spark-submit (fat JAR)](#spark-submit-fat-jar)
+    - [Variables de Entorno](#variables-de-entorno)
+    - [Interfaces Web](#interfaces-web)
+14. [Output del Pipeline](#output-del-pipeline)
+15. [Workflows de Trazabilidad — WF4, WF5, WF6](#workflows-de-trazabilidad--wf4-wf5-wf6)
+    - [WF4: Data Quality](#wf4-data-quality--dataqualityworkflow)
+    - [WF5: Lineage](#wf5-lineage--lineageworkflow)
+    - [WF6: Metrics](#wf6-metrics--metricsworkflow)
+16. [Auditoría del Pipeline — WF3: Hive Audit](#auditoría-del-pipeline--wf3-hive-audit)
+
+---
+
 ## Idea de Negocio
 
 Este proyecto implementa una plataforma de datos empresarial para dos unidades de negocio complementarias de una corporación multinacional:
@@ -511,9 +554,18 @@ data-engineer/
 │   │   │       └── workflow/                → 6 workflows (3 paralelos: Quality‖Lineage‖Analytics)
 │   │   ├── stream-processing/       → Spark Streaming + Kafka
 │   │   └── iot-ingestion/           → Kafka IoT Producer
-│   └── notebooks/databricks/
-│       ├── retail-client/            → Notebooks retail
-│       └── airbnb-analytics/         → Notebooks Airbnb
+│   └── notebooks/
+│       ├── databricks/
+│       │   ├── retail-client/        → Notebooks retail
+│       │   └── airbnb-analytics/     → Notebooks Airbnb
+│       └── ibm-cloud/               → Pipeline Medallion PySpark (IBM COS + Db2)
+│           ├── config.py            → Configuración COS, Db2, SparkSession
+│           ├── orchestrator.py      → Orquestador CLI (nbconvert)
+│           ├── Makefile             → make all / bronze / silver / gold
+│           ├── 01_bronze_layer.ipynb → RAW CSV → Bronze Parquet (7 tablas)
+│           ├── 02_silver_layer.ipynb → Bronze → Silver (8 tablas)
+│           ├── 03_gold_layer.ipynb   → Silver → Gold Star Schema (8 tablas)
+│           └── test_db2_spark.ipynb  → Test conectividad Db2 JDBC
 │
 ├── infrastructure/                  → IaC y despliegue
 │   ├── hadoop/                      → Docker Compose + Hadoop conf
@@ -521,6 +573,10 @@ data-engineer/
 │   ├── postgresql/                  → Docker Compose PostgreSQL
 │   ├── spark-k8s/                   → Spark on Kubernetes
 │   ├── databricks/                  → Bicep template
+│   ├── ibm-cloud/                   → IBM Cloud IaC + CI/CD
+│   │   ├── terraform/               → Terraform (COS, Db2, Spark)
+│   │   ├── tekton/                  → Tekton Pipelines + Triggers
+│   │   └── scripts/                 → Scripts de deploy y setup
 │   └── powerbi-export/              → Medidas DAX + Especificación visual del dashboard
 │
 ├── docs/                            → Documentación e imágenes
@@ -548,12 +604,20 @@ data-engineer/
 | [`transformation/spark-jobs/pipelines/stream-processing/`](transformation/spark-jobs/pipelines/stream-processing/) | Procesamiento streaming | Spark Structured Streaming + Kafka |
 | [`transformation/spark-jobs/pipelines/iot-ingestion/`](transformation/spark-jobs/pipelines/iot-ingestion/) | Ingesta IoT | Producer Kafka para sensores |
 | [`transformation/notebooks/databricks/`](transformation/notebooks/databricks/) | Notebooks interactivos | Retail-client, Airbnb analytics |
+| [`transformation/notebooks/ibm-cloud/`](transformation/notebooks/ibm-cloud/) | **Pipeline Medallion PySpark** | 3 notebooks (Bronze → Silver → Gold) + config + orchestrator |
+| [`transformation/notebooks/ibm-cloud/01_bronze_layer.ipynb`](transformation/notebooks/ibm-cloud/01_bronze_layer.ipynb) | Bronze Layer (IBM COS) | RAW CSV → Parquet con schema enforcement y deduplicación |
+| [`transformation/notebooks/ibm-cloud/02_silver_layer.ipynb`](transformation/notebooks/ibm-cloud/02_silver_layer.ipynb) | Silver Layer (IBM COS) | Business logic: joins, RFM, eficiencia minera, segmentación |
+| [`transformation/notebooks/ibm-cloud/03_gold_layer.ipynb`](transformation/notebooks/ibm-cloud/03_gold_layer.ipynb) | Gold Layer (IBM COS) | Star Schema: 4 dimensiones + 2 facts + 2 KPIs |
 | [`infrastructure/`](infrastructure/) | Infraestructura como código | Docker, Kubernetes, Bicep |
 | [`infrastructure/hadoop/`](infrastructure/hadoop/) | Cluster Hadoop | Docker Compose + configuración HDFS |
 | [`infrastructure/kafka/`](infrastructure/kafka/) | Cluster Kafka | Docker Compose + config |
 | [`infrastructure/postgresql/`](infrastructure/postgresql/) | Base PostgreSQL | Docker Compose |
 | [`infrastructure/spark-k8s/`](infrastructure/spark-k8s/) | Spark en Kubernetes | Dockerfiles + manifests K8s |
 | [`infrastructure/databricks/`](infrastructure/databricks/) | Databricks IaC | Bicep template (main.bicep) |
+| [`infrastructure/ibm-cloud/`](infrastructure/ibm-cloud/) | IBM Cloud IaC + CI/CD | Terraform, Tekton Pipelines, scripts de deploy |
+| [`infrastructure/ibm-cloud/terraform/`](infrastructure/ibm-cloud/terraform/) | Terraform IBM Cloud | COS buckets, Db2, Spark environment |
+| [`infrastructure/ibm-cloud/tekton/`](infrastructure/ibm-cloud/tekton/) | CI/CD Tekton | Pipeline, tasks, triggers para deploy automatizado |
+| [`infrastructure/ibm-cloud/scripts/`](infrastructure/ibm-cloud/scripts/) | Scripts de setup | deploy-spark.sh, setup-cicd.sh, setup.sh |
 | [`infrastructure/powerbi-export/`](infrastructure/powerbi-export/) | **[Power BI — Dashboard Retail Analytics](infrastructure/powerbi-export/README.md)** | Especificación de 7 páginas, maquetas Mermaid, 57 medidas DAX |
 | [`docs/`](docs/) | Documentación | Imágenes y diagramas |
 | [`docs/analytics/`](docs/analytics/) | Gráficos BI Analytics | 10 visualizaciones PNG del Gold layer |
@@ -633,8 +697,11 @@ graph LR
 | Orquestación Cloud | Azure Data Factory | — |
 | Streaming | Apache Kafka | — |
 | Container Orchestration | Kubernetes | — |
-| IaC | Docker Compose / Bicep | — |
+| IaC | Docker Compose / Bicep / Terraform | — |
 | **BI Charts** | **JFreeChart** | **1.5.4** |
+| Cloud Storage | IBM Cloud Object Storage (S3A) | — |
+| Cloud Database | IBM Db2 on Cloud | — |
+| CI/CD | Tekton Pipelines | — |
 
 ---
 
@@ -691,6 +758,95 @@ src/main/scala/medallion/
 | `medallion.workflow` | `DataQualityWorkflow.scala` | WF4: Validación de nulls, duplicados, schema conformance, quality score A+/A/B/C/D |
 | `medallion.workflow` | `LineageWorkflow.scala` | WF5: Captura source→target por tabla, exporta manifest JSON a `datalake/lineage/` |
 | `medallion.workflow` | `MetricsWorkflow.scala` | WF6: Thread-safe (ConcurrentHashMap). Timing, throughput, JVM, parallel detection, JSON export |
+
+---
+
+## Pipeline Medallion — Notebooks IBM Cloud (PySpark)
+
+Implementación alternativa del pipeline Medallion usando **PySpark notebooks** sobre **IBM Cloud Object Storage (COS)** con persistencia opcional en **IBM Db2 on Cloud**. Cada notebook corresponde a una capa de la arquitectura medallón y puede ejecutarse de forma independiente o encadenada mediante el orquestador CLI.
+
+### Arquitectura IBM Cloud
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    IBM Cloud Object Storage                      │
+│  ┌──────────────┐ ┌────────────────┐ ┌────────────────────────┐ │
+│  │ datalake-raw  │ │ datalake-bronze │ │ datalake-silver        │ │
+│  │  (CSV)        │ │  (Parquet)      │ │  (Parquet)             │ │
+│  └──────┬───────┘ └───────┬────────┘ └──────────┬─────────────┘ │
+│         │                 │                      │               │
+│  ┌──────┴─────────────────┴──────────────────────┴─────────────┐ │
+│  │                    PySpark (local[*])                         │ │
+│  │  01_bronze_layer → 02_silver_layer → 03_gold_layer           │ │
+│  └──────────────────────────────────────────────┬──────────────┘ │
+│                                                  │               │
+│  ┌──────────────────────────────────────────────┴──────────────┐ │
+│  │ datalake-gold  (Parquet — Star Schema: 4 dims + 2 facts     │ │
+│  │                 + 2 KPIs = 8 tablas)                         │ │
+│  └──────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Notebooks
+
+| # | Notebook | Capa | Tablas | Visualizaciones | Descripción |
+|---|----------|------|--------|-----------------|-------------|
+| 1 | [`01_bronze_layer.ipynb`](transformation/notebooks/ibm-cloud/01_bronze_layer.ipynb) | Bronze | 7 | 2 | Ingesta CSV → Parquet con schema enforcement, deduplicación y auditoría |
+| 2 | [`02_silver_layer.ipynb`](transformation/notebooks/ibm-cloud/02_silver_layer.ipynb) | Silver | 8 | 4 | Business logic: joins, cálculos financieros, RFM, eficiencia minera |
+| 3 | [`03_gold_layer.ipynb`](transformation/notebooks/ibm-cloud/03_gold_layer.ipynb) | Gold | 8 | 5 | Star Schema dimensional: dimensiones, facts, KPIs con validación de integridad |
+
+### Tablas Gold generadas (PySpark)
+
+| Tabla | Tipo | Fuentes Silver | Descripción |
+|-------|------|----------------|-------------|
+| `dim_producto` | Dimensión | catalogo_productos + rentabilidad_producto | Clasificación de rentabilidad y rotación |
+| `dim_cliente` | Dimensión | segmentacion_clientes | Segmentación RFM, LTV anualizado, rangos por cuartil |
+| `dim_tiempo` | Dimensión | ventas_enriquecidas (generada) | Calendario: Year, Month, Quarter, DayOfWeek, IsWeekend |
+| `dim_operador` | Dimensión | produccion_operador | Niveles de eficiencia y categoría de productividad |
+| `fact_ventas` | Fact | ventas_enriquecidas + dims | FKs dimensionales + métricas financieras y logísticas |
+| `fact_produccion_minera` | Fact | eficiencia_minera | Clasificación de eficiencia por camión/proyecto |
+| `kpi_ventas_mensuales` | KPI | resumen_ventas_mensuales | Crecimiento MoM (%) de revenue y órdenes |
+| `kpi_mineria` | KPI | produccion_por_pais | Producción global, waste ratio, timestamp de generación |
+
+### Configuración y Orquestación
+
+| Archivo | Descripción |
+|---------|-------------|
+| [`config.py`](transformation/notebooks/ibm-cloud/config.py) | Credenciales COS (S3A) + Db2 JDBC + builder de SparkSession con Delta Lake |
+| [`orchestrator.py`](transformation/notebooks/ibm-cloud/orchestrator.py) | CLI que ejecuta notebooks en secuencia via `nbconvert` |
+| [`Makefile`](transformation/notebooks/ibm-cloud/Makefile) | Atajos: `make all`, `make bronze`, `make silver`, `make gold`, `make dry-run` |
+| [`README.md`](transformation/notebooks/ibm-cloud/README.md) | Documentación detallada del pipeline IBM Cloud |
+
+---
+
+## Infraestructura IBM Cloud — CI/CD y Terraform
+
+Infraestructura como código para desplegar el pipeline Medallion en IBM Cloud, incluyendo aprovisionamiento de recursos con Terraform y CI/CD con Tekton Pipelines.
+
+### Terraform — Aprovisionamiento
+
+| Archivo | Descripción |
+|---------|-------------|
+| [`main.tf`](infrastructure/ibm-cloud/terraform/main.tf) | Recursos principales: COS buckets, Db2, Spark environment |
+| [`variables.tf`](infrastructure/ibm-cloud/terraform/variables.tf) | Variables de configuración (región, plan, nombres) |
+| [`outputs.tf`](infrastructure/ibm-cloud/terraform/outputs.tf) | Outputs: endpoints, IDs de recursos |
+| [`terraform.tfvars.example`](infrastructure/ibm-cloud/terraform/terraform.tfvars.example) | Ejemplo de valores para variables |
+
+### Tekton — CI/CD Pipelines
+
+| Archivo | Descripción |
+|---------|-------------|
+| [`pipeline.yaml`](infrastructure/ibm-cloud/tekton/pipeline.yaml) | Pipeline de deploy: build → test → deploy |
+| [`tasks.yaml`](infrastructure/ibm-cloud/tekton/tasks.yaml) | Definición de tasks individuales |
+| [`triggers.yaml`](infrastructure/ibm-cloud/tekton/triggers.yaml) | Triggers para ejecución automática (push/PR) |
+
+### Scripts de Deploy
+
+| Archivo | Descripción |
+|---------|-------------|
+| [`setup.sh`](infrastructure/ibm-cloud/scripts/setup.sh) | Setup inicial del entorno IBM Cloud |
+| [`deploy-spark.sh`](infrastructure/ibm-cloud/scripts/deploy-spark.sh) | Deploy del cluster Spark |
+| [`setup-cicd.sh`](infrastructure/ibm-cloud/scripts/setup-cicd.sh) | Configuración del pipeline CI/CD |
 
 ---
 

@@ -4,4 +4,5 @@
 /transformation/spark-jobs/pipelines/batch-etl-scala/datalake
 /transformation/spark-jobs/pipelines/batch-etl-scala/spark-warehouse
 /transformation/spark-jobs/pipelines/batch-etl-scala/.bsp
-/transformation/spark-jobs/pipelines/batch-etl-scala/.bsp
+/transformation/notebooks/ibm-cloud/__pycache__/
+/infrastructure/ibm-cloud/
