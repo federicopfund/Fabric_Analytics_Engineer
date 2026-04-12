@@ -1,0 +1,387 @@
+-- ════════════════════════════════════════════════════════════════════════════════
+-- ESPECIFICACIÓN DE OBJETOS VISUALES — POWER BI
+-- Modelo: fact_ventas + dim_cliente + dim_producto + Calendario + kpi_ventas_mensuales
+-- ════════════════════════════════════════════════════════════════════════════════
+--
+-- Convención de ejes:
+--   Eje X / Eje     = Eje horizontal o categoría
+--   Eje Y / Valores = Eje vertical o numérico
+--   Leyenda         = Segmentación por color/serie
+--   Detalles        = Drill-down o tooltip
+--   Filtros         = Slicers o filtros de nivel visual
+--
+-- ════════════════════════════════════════════════════════════════════════════════
+
+
+-- ┌────────────────────────────────────────────────────────────────────────────┐
+-- │  PÁGINA 1: RESUMEN EJECUTIVO                                              │
+-- │  Propósito: Vista gerencial de KPIs principales con tendencia             │
+-- └────────────────────────────────────────────────────────────────────────────┘
+
+-- ── 1.1  TARJETA (Card) — Ingreso Bruto Total ──────────────────────────────
+--   Campo:       fact_ventas[Ingreso Bruto]
+--   Subtítulo:   fact_ventas[Ingreso Bruto Formato]
+--   Formato:     Moneda $ sin decimales
+
+-- ── 1.2  TARJETA (Card) — Margen Bruto ─────────────────────────────────────
+--   Campo:       fact_ventas[Margen Bruto]
+--   Formato:     Moneda $
+
+-- ── 1.3  TARJETA (Card) — Total Órdenes ────────────────────────────────────
+--   Campo:       fact_ventas[Total Ordenes]
+--   Formato:     Entero con separador de miles
+
+-- ── 1.4  TARJETA (Card) — Clientes Únicos ──────────────────────────────────
+--   Campo:       fact_ventas[Clientes Unicos]
+--   Formato:     Entero con separador de miles
+
+-- ── 1.5  TARJETA (Card) — Pct Margen ───────────────────────────────────────
+--   Campo:       fact_ventas[Pct Margen]
+--   Formato:     Porcentaje 1 decimal
+--   Color cond:  >= 45% verde, >= 35% amarillo, < 35% rojo
+
+-- ── 1.6  TARJETA (Card) — KPI Indicador Ingreso ────────────────────────────
+--   Campo:       fact_ventas[KPI Indicador Ingreso]
+--   Formato:     Texto (▲ Crecimiento / ▼ Caída / ► Estable)
+
+-- ── 1.7  GRÁFICO DE LÍNEAS (Line Chart) — Tendencia Ingreso Mensual ────────
+--   Eje X:       Calendario[MesAnio]           (ordenar por Calendario[MesOrden])
+--   Eje Y:       fact_ventas[Ingreso Bruto]
+--   Línea sec:   fact_ventas[Media Movil 3M Ingreso]   (línea punteada)
+--   Tooltip:     fact_ventas[Variacion MoM Pct]
+--                fact_ventas[Total Ordenes]
+
+-- ── 1.8  INDICADOR KPI (KPI Visual) — Cumplimiento Objetivo ────────────────
+--   Valor:       fact_ventas[Ingreso Bruto]
+--   Objetivo:    fact_ventas[Objetivo Ingreso Mensual]    (500,000)
+--   Eje tend:    Calendario[MesAnio]
+--   Estado:      fact_ventas[Cumplimiento Objetivo]        (% formato)
+
+-- ── 1.9  GRÁFICO DE BARRAS APILADAS (Stacked Bar) — Ingreso x Categoría ────
+--   Eje Y:       fact_ventas[categoria]
+--   Eje X:       fact_ventas[Ingreso Bruto]
+--   Leyenda:     Calendario[Anio]
+--   Etiquetas:   fact_ventas[Ingreso Bruto Formato]
+
+-- ── 1.10 SEGMENTADOR (Slicer) — Filtro Año ─────────────────────────────────
+--   Campo:       Calendario[Anio]
+--   Estilo:      Botones / Dropdown
+--   Selección:   Única
+
+-- ── 1.11 SEGMENTADOR (Slicer) — Filtro Trimestre ───────────────────────────
+--   Campo:       Calendario[TrimestreLabel]
+--   Estilo:      Botones horizontales (Q1, Q2, Q3, Q4)
+
+
+-- ┌────────────────────────────────────────────────────────────────────────────┐
+-- │  PÁGINA 2: ANÁLISIS DE VENTAS                                             │
+-- │  Propósito: Desagregación temporal y categórica del ingreso               │
+-- └────────────────────────────────────────────────────────────────────────────┘
+
+-- ── 2.1  GRÁFICO DE ÁREA (Area Chart) — Ingreso YTD Acumulado ──────────────
+--   Eje X:       Calendario[MesAnio]           (ordenar por Calendario[MesOrden])
+--   Eje Y:       fact_ventas[Ingreso YTD]
+--   Leyenda:     Calendario[Anio]              (una serie por año)
+--   Tooltip:     fact_ventas[Variacion YoY Pct]
+
+-- ── 2.2  GRÁFICO DE COLUMNAS AGRUPADAS (Clustered Column) — MoM ────────────
+--   Eje X:       Calendario[MesCorto]          (ordenar por Calendario[Mes])
+--   Eje Y:       fact_ventas[Ingreso Bruto]
+--   Leyenda:     Calendario[Anio]
+--   Línea sec:   fact_ventas[Variacion MoM Pct]  (eje Y secundario, formato %)
+--   Tooltip:     fact_ventas[Ingreso Mes Anterior]
+
+-- ── 2.3  GRÁFICO DE COLUMNAS AGRUPADAS (Clustered Column) — x Trimestre ────
+--   Eje X:       Calendario[AnioTrimestre]
+--   Eje Y:       fact_ventas[Ingreso Bruto]
+--   Eje Y sec:   fact_ventas[Pct Margen]             (línea superpuesta)
+--   Etiquetas:   Activadas sobre barras
+
+-- ── 2.4  GRÁFICO DE COLUMNAS 100% APILADAS — Composición por Categoría ─────
+--   Eje X:       Calendario[MesAnio]           (ordenar por Calendario[MesOrden])
+--   Eje Y:       fact_ventas[Ingreso Bruto]
+--   Leyenda:     fact_ventas[categoria]        (Bicicleta, Accesorio, Prenda)
+
+-- ── 2.5  TABLA (Table) — Detalle Mensual ────────────────────────────────────
+--   Columnas:    Calendario[MesAnio]
+--                fact_ventas[Ingreso Bruto]         (formato $ #,0)
+--                fact_ventas[Costo Total]           (formato $ #,0)
+--                fact_ventas[Margen Bruto]          (formato $ #,0)
+--                fact_ventas[Pct Margen]            (formato % 1 dec)
+--                fact_ventas[Variacion MoM Pct]     (formato % 1 dec, barras datos)
+--                fact_ventas[Total Ordenes]         (formato #,0)
+--   Formato cond: Barras de datos en Variacion MoM Pct
+--                 Escala color fondo en Pct Margen (rojo→verde)
+
+-- ── 2.6  SEGMENTADORES ─────────────────────────────────────────────────────
+--   Slicer 1:    Calendario[Anio]              (Dropdown)
+--   Slicer 2:    fact_ventas[categoria]        (Botones)
+--   Slicer 3:    fact_ventas[subcategoria]     (Dropdown multi-select)
+
+
+-- ┌────────────────────────────────────────────────────────────────────────────┐
+-- │  PÁGINA 3: RENTABILIDAD                                                   │
+-- │  Propósito: Análisis de márgenes, costos, impacto de promociones          │
+-- └────────────────────────────────────────────────────────────────────────────┘
+
+-- ── 3.1  GRÁFICO DE CASCADA (Waterfall) — De Ingreso a Ganancia Neta ────────
+--   Categoría:   Columnas fijas:
+--                  "Ingreso Bruto"  → fact_ventas[Ingreso Bruto]    (inicio)
+--                  "Costo"          → fact_ventas[Costo Total]      (decremento)
+--                  "Margen Bruto"   → fact_ventas[Margen Bruto]     (subtotal)
+--                  "Impuestos"      → fact_ventas[Total Impuestos]  (decremento)
+--                  "Flete"          → fact_ventas[Total Flete]      (decremento)
+--                  "Ganancia Neta"  → fact_ventas[Ganancia Neta]    (total)
+--   Nota:         Usar columna calculada auxiliar o series manuales
+
+-- ── 3.2  GRÁFICO DE LÍNEAS DOBLE EJE — Margen % vs Ingreso ─────────────────
+--   Eje X:       Calendario[MesAnio]           (ordenar por Calendario[MesOrden])
+--   Eje Y prim:  fact_ventas[Ingreso Bruto]    (barras columna)
+--   Eje Y sec:   fact_ventas[Pct Margen]       (línea, formato %)
+--   Tooltip:     fact_ventas[Pct Ganancia Neta]
+
+-- ── 3.3  GRÁFICO DE BARRAS (Bar Chart) — Margen por Subcategoría ────────────
+--   Eje Y:       fact_ventas[subcategoria]
+--   Eje X:       fact_ventas[Margen Bruto]
+--   Etiquetas:   fact_ventas[Pct Margen]       (formato %)
+--   Ordenar:     Por Margen Bruto descendente
+
+-- ── 3.4  GRÁFICO DE COLUMNAS AGRUPADAS — Promoción vs Sin Promoción ────────
+--   Eje X:       {"Con Promoción", "Sin Promoción"}
+--   Eje Y:       fact_ventas[Margen Con Promocion]
+--                fact_ventas[Margen Sin Promocion]
+--   Tooltip:     fact_ventas[Pct Ordenes Promocion]
+--                fact_ventas[Ingreso Con Promocion]
+
+-- ── 3.5  TARJETAS (Cards × 3)  ─────────────────────────────────────────────
+--   Tarjeta A:   fact_ventas[Ganancia Neta]     (formato $ #,0)
+--   Tarjeta B:   fact_ventas[Pct Ganancia Neta] (formato % 1 dec)
+--   Tarjeta C:   fact_ventas[Ganancia Neta YTD] (formato $ #,0)
+
+-- ── 3.6  GRÁFICO DE LÍNEAS — Margen YTD por Año ────────────────────────────
+--   Eje X:       Calendario[MesCorto]          (ordenar por Calendario[Mes])
+--   Eje Y:       fact_ventas[Margen YTD]
+--   Leyenda:     Calendario[Anio]
+--   Tooltip:     fact_ventas[Variacion Margen MoM Pct]
+
+
+-- ┌────────────────────────────────────────────────────────────────────────────┐
+-- │  PÁGINA 4: ANÁLISIS DE PRODUCTO                                           │
+-- │  Propósito: Performance de productos, categorías, clasificación           │
+-- └────────────────────────────────────────────────────────────────────────────┘
+
+-- ── 4.1  GRÁFICO DE ANILLO (Donut Chart) — Participación por Categoría ──────
+--   Leyenda:     fact_ventas[categoria]
+--   Valores:     fact_ventas[Ingreso Bruto]
+--   Etiquetas:   fact_ventas[Pct Participacion Categoria]  (formato %)
+--   Centro:      Texto "Categorías"
+
+-- ── 4.2  GRÁFICO DE BARRAS (Bar Chart) — Top 10 Productos ──────────────────
+--   Eje Y:       dim_producto[producto_nombre]
+--   Eje X:       fact_ventas[Ingreso Bruto]
+--   Filtro vis:  fact_ventas[Ranking Producto Ingreso] <= 10
+--   Etiquetas:   fact_ventas[Ingreso Bruto Formato]
+--   Ordenar:     Ingreso Bruto descendente
+
+-- ── 4.3  SCATTER PLOT — Rentabilidad vs Rotación por Producto ──────────────
+--   Eje X:       dim_producto[unidades_vendidas]           (rotación)
+--   Eje Y:       dim_producto[pct_margen]                  (rentabilidad %)
+--   Tamaño:      dim_producto[revenue_total]
+--   Leyenda:     dim_producto[clasificacion_rentabilidad]  (color por grupo)
+--   Detalles:    dim_producto[producto_nombre]
+--   Tooltip:     dim_producto[clasificacion_rotacion]
+--                dim_producto[precio_promedio]
+
+-- ── 4.4  TREEMAP — Ingreso por Subcategoría ─────────────────────────────────
+--   Grupo:       fact_ventas[categoria]
+--   Detalles:    fact_ventas[subcategoria]
+--   Valores:     fact_ventas[Ingreso Bruto]
+--   Tooltip:     fact_ventas[Pct Participacion Subcategoria]
+--                fact_ventas[Unidades Vendidas]
+
+-- ── 4.5  TARJETAS (Cards × 3) ──────────────────────────────────────────────
+--   Tarjeta A:   dim_producto[Pct Productos Estrella]     (formato % 0 dec)
+--   Tarjeta B:   dim_producto[Productos Sin Ventas]       (formato entero)
+--   Tarjeta C:   dim_producto[Productos Alta Rotacion]    (formato entero)
+
+-- ── 4.6  MATRIZ (Matrix) — Categoría × Trimestre ───────────────────────────
+--   Filas:       fact_ventas[categoria]
+--                fact_ventas[subcategoria]      (drill-down)
+--   Columnas:    Calendario[AnioTrimestre]
+--   Valores:     fact_ventas[Ingreso Bruto]     (formato $ #,0)
+--                fact_ventas[Pct Margen]         (formato %)
+--   Formato cond: Escala de color en Ingreso Bruto (claro→oscuro)
+--   Subtotales:  Activados por fila y columna
+
+
+-- ┌────────────────────────────────────────────────────────────────────────────┐
+-- │  PÁGINA 5: SEGMENTACIÓN DE CLIENTES                                       │
+-- │  Propósito: Perfil RFM, valor de vida, retención                          │
+-- └────────────────────────────────────────────────────────────────────────────┘
+
+-- ── 5.1  GRÁFICO DE ANILLO (Donut Chart) — Distribución por Segmento ────────
+--   Leyenda:     fact_ventas[segmento_cliente]    (Premium/Regular/Ocasional)
+--   Valores:     fact_ventas[Clientes Unicos]
+--   Etiquetas:   Porcentaje + valor absoluto
+--   Colores:     Premium=#2E86C1, Regular=#27AE60, Ocasional=#F39C12
+
+-- ── 5.2  GRÁFICO DE BARRAS AGRUPADAS — Ingreso por Segmento ────────────────
+--   Eje Y:       fact_ventas[segmento_cliente]
+--   Eje X:       fact_ventas[Ingreso Bruto]
+--   Etiquetas:   fact_ventas[Pct Ingreso Segmento]   (formato %)
+--   Ordenar:     Ingreso Bruto descendente
+
+-- ── 5.3  GRÁFICO DE COLUMNAS — Ticket Promedio por Segmento ────────────────
+--   Eje X:       fact_ventas[segmento_cliente]
+--   Eje Y:       fact_ventas[Ticket Promedio]
+--   Línea ref:   fact_ventas[Ticket Promedio Premium]    (línea constante)
+--   Etiquetas:   Formato $ #,0
+
+-- ── 5.4  SCATTER PLOT — Score Frecuencia vs Score Monetario ─────────────────
+--   Eje X:       dim_cliente[score_frecuencia]
+--   Eje Y:       dim_cliente[score_monetario]
+--   Tamaño:      dim_cliente[ltv_anualizado]
+--   Leyenda:     dim_cliente[segmento]           (color por segmento)
+--   Detalles:    dim_cliente[cliente_key]
+--   Tooltip:     dim_cliente[frecuencia_compras]
+--                dim_cliente[valor_monetario]
+
+-- ── 5.5  TARJETAS (Cards × 4) ──────────────────────────────────────────────
+--   Tarjeta A:   fact_ventas[Pct Clientes Premium]         (formato % 1 dec)
+--   Tarjeta B:   dim_cliente[LTV Anualizado Promedio]      (formato $ #,0)
+--   Tarjeta C:   fact_ventas[Tasa Retencion]               (formato % 1 dec)
+--   Tarjeta D:   dim_cliente[Frecuencia Compra Promedio]   (formato #,0.0)
+
+-- ── 5.6  GRÁFICO DE COLUMNAS — LTV por Segmento ────────────────────────────
+--   Eje X:       dim_cliente[segmento]
+--   Eje Y:       dim_cliente[LTV Anualizado Promedio]
+--   Eje Y sec:   dim_cliente[Antiguedad Promedio Dias]     (línea)
+--   Tooltip:     dim_cliente[Score Monetario Promedio]
+
+-- ── 5.7  TABLA (Table) — Perfil de Segmentos Resumen ───────────────────────
+--   Columnas:    fact_ventas[segmento_cliente]
+--                fact_ventas[Clientes Unicos]
+--                fact_ventas[Ingreso Bruto]          (formato $ #,0)
+--                fact_ventas[Ingreso por Cliente]    (formato $ #,0)
+--                fact_ventas[Ticket Promedio]        (formato $ #,0)
+--                fact_ventas[Pct Ingreso Segmento]   (formato %)
+--                fact_ventas[Tasa Retencion]          (formato %)
+--   Formato cond: Barras de datos en Ingreso Bruto
+
+
+-- ┌────────────────────────────────────────────────────────────────────────────┐
+-- │  PÁGINA 6: TENDENCIA Y FORECAST                                           │
+-- │  Propósito: Patrones estacionales, comparativas YoY, proyecciones         │
+-- └────────────────────────────────────────────────────────────────────────────┘
+
+-- ── 6.1  GRÁFICO DE LÍNEAS + FORECAST — Tendencia Ingreso con Pronóstico ───
+--   Eje X:       Calendario[Date]               (continuo, granularidad mes)
+--   Eje Y:       fact_ventas[Ingreso Bruto]
+--   Forecast:    Activar Analytics → Forecast (intervalo confianza 95%, 3 meses)
+--   Línea sec:   fact_ventas[Media Movil 3M Ingreso]    (punteada, gris)
+
+-- ── 6.2  GRÁFICO DE LÍNEAS MÚLTIPLES — Comparativa Año sobre Año ───────────
+--   Eje X:       Calendario[MesCorto]           (ordenar por Calendario[Mes])
+--   Eje Y:       fact_ventas[Ingreso Bruto]
+--   Leyenda:     Calendario[Anio]               (una línea por año)
+--   Tooltip:     fact_ventas[Variacion YoY Pct]
+--   Marcadores:  Activados en cada punto
+
+-- ── 6.3  GRÁFICO DE ÁREA APILADA — Ingreso QTD por Categoría ───────────────
+--   Eje X:       Calendario[MesAnio]           (ordenar por Calendario[MesOrden])
+--   Eje Y:       fact_ventas[Ingreso QTD]
+--   Leyenda:     fact_ventas[categoria]
+
+-- ── 6.4  GRÁFICO DE COLUMNAS — Variación YoY por Trimestre ─────────────────
+--   Eje X:       Calendario[AnioTrimestre]
+--   Eje Y:       fact_ventas[Variacion YoY Pct]    (formato %)
+--   Color cond:  Positivo = verde, Negativo = rojo
+--   Línea ref:   Constante línea en 0%
+
+-- ── 6.5  TARJETAS (Cards × 3) ──────────────────────────────────────────────
+--   Tarjeta A:   fact_ventas[Ingreso YTD]                   (formato $ #,0)
+--   Tarjeta B:   fact_ventas[Variacion YoY Pct]             (formato % 1 dec)
+--   Tarjeta C:   fact_ventas[Variacion Ordenes MoM Pct]     (formato % 1 dec)
+
+-- ── 6.6  GRÁFICO RIBBON (Ribbon Chart) — Ranking Categoría en el Tiempo ────
+--   Eje X:       Calendario[AnioTrimestre]
+--   Eje Y:       fact_ventas[Ingreso Bruto]
+--   Leyenda:     fact_ventas[categoria]
+--   Nota:        Muestra cambio de posición relativa entre categorías
+
+
+-- ┌────────────────────────────────────────────────────────────────────────────┐
+-- │  PÁGINA 7: DETALLE OPERACIONAL                                            │
+-- │  Propósito: Drill-through, envío, territorio, tabla granular              │
+-- └────────────────────────────────────────────────────────────────────────────┘
+
+-- ── 7.1  MAPA DE CALOR / MATRIZ — Órdenes por Día de Semana y Mes ──────────
+--   Filas:       Calendario[NombreDia]          (ordenar por Calendario[DiaSemana])
+--   Columnas:    Calendario[MesCorto]           (ordenar por Calendario[Mes])
+--   Valores:     fact_ventas[Total Ordenes]
+--   Formato cond: Escala de color (blanco→azul intenso)
+
+-- ── 7.2  GRÁFICO DE BARRAS — Ingreso por Territorio ────────────────────────
+--   Eje Y:       fact_ventas[territorio_key]     (como texto categórico)
+--   Eje X:       fact_ventas[Ingreso Bruto]
+--   Etiquetas:   fact_ventas[Ingreso Bruto Formato]
+--   Ordenar:     Ingreso Bruto descendente
+
+-- ── 7.3  HISTOGRAMA / COLUMNAS — Distribución Días de Envío ────────────────
+--   Eje X:       fact_ventas[dias_envio]          (valores discretos 1-14)
+--   Eje Y:       fact_ventas[Total Ordenes]       (conteo)
+--   Línea ref:   fact_ventas[Dias Envio Promedio]  (línea vertical punteada)
+--   Color:       Gradiente claro→oscuro por cantidad
+
+-- ── 7.4  GRÁFICO DE COLUMNAS APILADAS — Envío por Tipo ─────────────────────
+--   Eje X:       Calendario[AnioTrimestre]
+--   Eje Y:       fact_ventas[Total Ordenes]
+--   Leyenda:     fact_ventas[tipo_envio]
+--   Tooltip:     fact_ventas[Dias Envio Promedio]
+
+-- ── 7.5  TABLA DRILL-THROUGH — Detalle de Órdenes ──────────────────────────
+--   Drill-through por: dim_producto[producto_nombre]
+--                      fact_ventas[segmento_cliente]
+--                      Calendario[MesAnio]
+--   Columnas:    fact_ventas[orden_id]
+--                Calendario[Date]                    (formato dd/MM/yyyy)
+--                dim_producto[producto_nombre]
+--                fact_ventas[cantidad]
+--                fact_ventas[precio_unitario]        (formato $ #,0.00)
+--                fact_ventas[ingreso_bruto]          (formato $ #,0.00)
+--                fact_ventas[margen_bruto]           (formato $ #,0.00)
+--                fact_ventas[pct_margen]             (formato % 1 dec)
+--                fact_ventas[dias_envio]
+--                fact_ventas[tiene_promocion]        (Sí/No)
+--                fact_ventas[segmento_cliente]
+
+-- ── 7.6  TARJETAS (Cards × 2) ──────────────────────────────────────────────
+--   Tarjeta A:   fact_ventas[Ultimo Periodo]
+--   Tarjeta B:   fact_ventas[Productos Vendidos]
+
+
+-- ════════════════════════════════════════════════════════════════════════════════
+-- RESUMEN: FILTROS GLOBALES (Aplicar en todas las páginas)
+-- ════════════════════════════════════════════════════════════════════════════════
+--
+--   Panel de filtros persistente (sincronizar entre páginas):
+--     1. Calendario[Anio]              → Slicer Dropdown
+--     2. Calendario[TrimestreLabel]    → Slicer Botones
+--     3. fact_ventas[categoria]        → Slicer Botones
+--     4. fact_ventas[segmento_cliente] → Slicer Dropdown
+--
+-- ════════════════════════════════════════════════════════════════════════════════
+-- TEMA DE COLORES SUGERIDO
+-- ════════════════════════════════════════════════════════════════════════════════
+--
+--   Primario:     #2E4057  (azul oscuro — fondo headers)
+--   Secundario:   #048A81  (verde azulado — barras principales)
+--   Acento 1:     #54C6EB  (celeste — líneas secundarias)
+--   Acento 2:     #8EE3EF  (celeste claro — áreas)
+--   Positivo:     #27AE60  (verde — crecimiento)
+--   Negativo:     #E74C3C  (rojo — caída)
+--   Neutro:       #95A5A6  (gris — estable)
+--   Fondo:        #F8F9FA  (gris muy claro)
+--   Texto:        #2C3E50  (gris oscuro)
+--
+-- ════════════════════════════════════════════════════════════════════════════════
