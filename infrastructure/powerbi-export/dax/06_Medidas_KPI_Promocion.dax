@@ -1,0 +1,120 @@
+-- ════════════════════════════════════════════════════════════════════════════
+-- MEDIDAS KPI, PROMOCIÓN, FORMATO
+-- Tarjetas, semáforos, objetivos y helpers de formato
+-- ════════════════════════════════════════════════════════════════════════════
+
+DEFINE
+
+    MEASURE fact_ventas[Ingreso Bruto] =
+        SUM( fact_ventas[ingreso_bruto] )
+
+    MEASURE fact_ventas[Margen Bruto] =
+        SUM( fact_ventas[margen_bruto] )
+
+    MEASURE fact_ventas[Total Ordenes] =
+        DISTINCTCOUNT( fact_ventas[orden_id] )
+
+    MEASURE fact_ventas[Pct Margen] =
+        DIVIDE( [Margen Bruto], [Ingreso Bruto], 0 )
+
+    MEASURE fact_ventas[Ingreso Mes Anterior] =
+        CALCULATE(
+            [Ingreso Bruto],
+            DATEADD( Calendario[Date], -1, MONTH )
+        )
+
+    MEASURE fact_ventas[Variacion MoM Pct] =
+        VAR _actual   = [Ingreso Bruto]
+        VAR _anterior = [Ingreso Mes Anterior]
+        RETURN
+            DIVIDE( _actual - _anterior, _anterior, BLANK() )
+
+    -- ── PROMOCIÓN Y ENVÍO ─────────────────────────────────────────────────
+
+    -- % Órdenes con Promoción
+    MEASURE fact_ventas[Pct Ordenes Promocion] =
+        DIVIDE(
+            CALCULATE(
+                [Total Ordenes],
+                fact_ventas[tiene_promocion] = TRUE()
+            ),
+            [Total Ordenes],
+            0
+        )
+
+    -- Ingreso con Promoción
+    MEASURE fact_ventas[Ingreso Con Promocion] =
+        CALCULATE(
+            [Ingreso Bruto],
+            fact_ventas[tiene_promocion] = TRUE()
+        )
+
+    -- Margen con Promoción
+    MEASURE fact_ventas[Margen Con Promocion] =
+        CALCULATE(
+            [Pct Margen],
+            fact_ventas[tiene_promocion] = TRUE()
+        )
+
+    -- Margen sin Promoción
+    MEASURE fact_ventas[Margen Sin Promocion] =
+        CALCULATE(
+            [Pct Margen],
+            fact_ventas[tiene_promocion] = FALSE()
+        )
+
+    -- ── KPI SCORECARDS ────────────────────────────────────────────────────
+
+    -- Indicador Variación Ingreso (▲ / ▼ / ►)
+    MEASURE fact_ventas[KPI Indicador Ingreso] =
+        VAR _var = [Variacion MoM Pct]
+        RETURN
+            SWITCH(
+                TRUE(),
+                _var > 0.05,  "▲ Crecimiento",
+                _var < -0.05, "▼ Caída",
+                "► Estable"
+            )
+
+    -- Semáforo Margen (Verde / Amarillo / Rojo)
+    MEASURE fact_ventas[KPI Semaforo Margen] =
+        VAR _m = [Pct Margen]
+        RETURN
+            SWITCH(
+                TRUE(),
+                _m >= 0.45, "Verde",
+                _m >= 0.35, "Amarillo",
+                "Rojo"
+            )
+
+    -- Objetivo Ingreso Mensual (referencia estática)
+    MEASURE fact_ventas[Objetivo Ingreso Mensual] = 500000
+
+    -- Cumplimiento Objetivo (%)
+    MEASURE fact_ventas[Cumplimiento Objetivo] =
+        DIVIDE( [Ingreso Bruto], [Objetivo Ingreso Mensual], 0 )
+
+    -- ── FORMATO ───────────────────────────────────────────────────────────
+
+    -- Formato Moneda abreviado (K/M)
+    MEASURE fact_ventas[Ingreso Bruto Formato] =
+        IF(
+            [Ingreso Bruto] >= 1000000,
+            FORMAT( [Ingreso Bruto] / 1000000, "#,0.0" ) & "M",
+            IF(
+                [Ingreso Bruto] >= 1000,
+                FORMAT( [Ingreso Bruto] / 1000, "#,0.0" ) & "K",
+                FORMAT( [Ingreso Bruto], "#,0" )
+            )
+        )
+
+    -- Último Período con Datos
+    MEASURE fact_ventas[Ultimo Periodo] =
+        MAX( fact_ventas[periodo] )
+
+    -- Primer Período con Datos
+    MEASURE fact_ventas[Primer Periodo] =
+        MIN( fact_ventas[periodo] )
+
+EVALUATE
+ROW( "Validacion", "KPI y Promocion OK" )
