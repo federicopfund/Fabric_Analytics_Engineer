@@ -38,6 +38,8 @@ La estrategia de BI se estructura en tres niveles de análisis materializados co
 ### Análisis Operativo (Self-Service)
 Las tablas `fact_ventas` y `fact_produccion_minera` están diseñadas como modelos Star Schema que permiten análisis ad-hoc con filtros por período, categoría, territorio, segmento de cliente, país, proyecto y operador.
 
+> **📊 Dashboard Power BI**: La especificación completa de visuales, layouts con maquetas Mermaid y las 57 medidas DAX están documentadas en **[Power BI — Dashboard Retail Analytics](infrastructure/powerbi-export/README.md)**.
+
 ---
 
 ## Arquitectura Lakehouse
@@ -372,48 +374,67 @@ Modelos dimensionales Star Schema optimizados para consumo por Power BI. Escrito
 
 ## Dominios de Datos
 
-### Retail — Modelo Relacional
+## Modelo de Datos
 
 ```mermaid
 erDiagram
-    CATEGORIA ||--o{ SUBCATEGORIA : contiene
-    SUBCATEGORIA ||--o{ PRODUCTO : agrupa
-    PRODUCTO ||--o{ VENTAS_INTERNET : "se vende en"
-    VENTAS_INTERNET }o--|| SUCURSALES : territorio
+    Calendario ||--o{ fact_ventas : "Date → fecha_orden"
+    dim_producto ||--o{ fact_ventas : "producto_key"
+    dim_cliente ||--o{ fact_ventas : "cliente_key"
+    fact_ventas }o--|| kpi_ventas_mensuales : "periodo"
 
-    CATEGORIA {
-        int Cod_Categoria PK
-        string Categoria
+    Calendario {
+        date Date PK
+        int Anio
+        int Mes
+        string MesAnio
+        int Trimestre
+        string TrimestreLabel
+        int MesOrden
+        boolean EsFinDeSemana
     }
-    SUBCATEGORIA {
-        int Cod_SubCategoria PK
-        string SubCategoria
-        int Cod_Categoria FK
+
+    dim_producto {
+        int producto_key PK
+        string producto_nombre
+        string categoria
+        string subcategoria
+        string clasificacion_rentabilidad
+        string clasificacion_rotacion
+        float pct_margen
+        int unidades_vendidas
     }
-    PRODUCTO {
-        int Cod_Producto PK
-        string Producto
-        int Cod_SubCategoria FK
-        string Color
+
+    dim_cliente {
+        int cliente_key PK
+        string segmento
+        float score_frecuencia
+        float score_monetario
+        float ltv_anualizado
+        int antiguedad_dias
     }
-    VENTAS_INTERNET {
-        string NumeroOrden PK
-        int Cod_Producto FK
-        int Cod_Cliente
-        int Cod_Territorio FK
-        int Cantidad
-        double PrecioUnitario
-        double CostoUnitario
-        double Impuesto
-        double Flete
-        timestamp FechaOrden
-        timestamp FechaEnvio
+
+    fact_ventas {
+        string orden_id PK
+        int producto_key FK
+        int cliente_key FK
+        date fecha_orden FK
+        string categoria
+        string segmento_cliente
+        float ingreso_bruto
+        float costo_total
+        float margen_bruto
+        float ganancia_neta
+        int dias_envio
+        boolean tiene_promocion
     }
-    SUCURSALES {
-        int Cod_Sucursal PK
-        string Sucursal
-        double Latitud
-        double Longitud
+
+    kpi_ventas_mensuales {
+        string periodo PK
+        float ingreso_bruto
+        float margen_bruto
+        float variacion_mom_pct
+        float ingreso_ytd
     }
 ```
 
@@ -499,7 +520,8 @@ data-engineer/
 │   ├── kafka/                       → Docker Compose Kafka
 │   ├── postgresql/                  → Docker Compose PostgreSQL
 │   ├── spark-k8s/                   → Spark on Kubernetes
-│   └── databricks/                  → Bicep template
+│   ├── databricks/                  → Bicep template
+│   └── powerbi-export/              → Medidas DAX + Especificación visual del dashboard
 │
 ├── docs/                            → Documentación e imágenes
 │   ├── analytics/                   → Gráficos BI generados (10 PNG)
@@ -532,6 +554,7 @@ data-engineer/
 | [`infrastructure/postgresql/`](infrastructure/postgresql/) | Base PostgreSQL | Docker Compose |
 | [`infrastructure/spark-k8s/`](infrastructure/spark-k8s/) | Spark en Kubernetes | Dockerfiles + manifests K8s |
 | [`infrastructure/databricks/`](infrastructure/databricks/) | Databricks IaC | Bicep template (main.bicep) |
+| [`infrastructure/powerbi-export/`](infrastructure/powerbi-export/) | **[Power BI — Dashboard Retail Analytics](infrastructure/powerbi-export/README.md)** | Especificación de 7 páginas, maquetas Mermaid, 57 medidas DAX |
 | [`docs/`](docs/) | Documentación | Imágenes y diagramas |
 | [`docs/analytics/`](docs/analytics/) | Gráficos BI Analytics | 10 visualizaciones PNG del Gold layer |
 | [`docs/ANALYTICS.md`](docs/ANALYTICS.md) | Documentación analítica | Insights BI por gráfico y dataset |
