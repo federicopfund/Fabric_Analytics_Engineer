@@ -5,6 +5,7 @@ import java.util.concurrent.{ConcurrentHashMap, Executors, CountDownLatch}
 import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.JavaConverters._
 import scala.concurrent.{ExecutionContext, Future}
+import scala.util.control.NonFatal
 
 /**
  * DAG Executor — Motor de ejecución declarativa de tareas con dependencias.
@@ -16,12 +17,16 @@ import scala.concurrent.{ExecutionContext, Future}
  *   4. Cuando una task completa, re-evalúa qué tasks se desbloquean
  *   5. Repite hasta que todas las tasks estén completadas o fallidas
  *
- * Soporta retry con backoff exponencial y checkpoint para skip.
+ * Soporta:
+ *   - Retry con backoff exponencial (solo errores transitorios)
+ *   - Checkpoint JSON con metadatos por task
+ *   - Errores tipados (Transient/Fatal/Skippable)
+ *   - Tasks no-críticas que no propagan fallo a dependientes
  *
  * Uso:
  *   val tasks = Seq(
- *     DagTask("bronze", Set.empty, () => BronzeLayer.process(...)),
- *     DagTask("silver", Set("bronze"), () => SilverLayer.process(...)),
+ *     DagTask("bronze", Set.empty, () => Right(BronzeLayer.process(...))),
+ *     DagTask("silver", Set("bronze"), () => Right(SilverLayer.process(...))),
  *   )
  *   val executor = new DagExecutor(tasks, parallelism = 2)
  *   val results = executor.execute()
@@ -36,6 +41,7 @@ class DagExecutor(
 
   private val statusMap = new ConcurrentHashMap[String, TaskStatus]()
   private val taskMap = tasks.map(t => t.id -> t).toMap
+  private val durations = new ConcurrentHashMap[String, Long]()
 
   /** Ejecuta el DAG completo. Retorna mapa de taskId → status */
   def execute(): Map[String, TaskStatus] = {
@@ -64,17 +70,33 @@ class DagExecutor(
       val readyTasks = tasks.filter { t =>
         statusMap.get(t.id) == Pending && t.dependencies.forall { dep =>
           val depStatus = statusMap.get(dep)
-          depStatus == Completed || depStatus == Skipped
+          depStatus == Completed || depStatus == Skipped ||
+            depStatus.isInstanceOf[CompletedWithWarning] ||
+            // Tasks no-críticas fallidas no bloquean dependientes
+            (depStatus.isInstanceOf[Failed] && taskMap.get(dep).exists(!_.critical))
         }
       }
 
       readyTasks.foreach { task =>
         if (statusMap.replace(task.id, Pending, Running)) {
           Future {
-            val result = executeWithRetry(task)
+            // Check if critical dependency failed
+            val blockedByFailedDep = task.dependencies.exists { dep =>
+              statusMap.get(dep).isInstanceOf[Failed] && taskMap.get(dep).exists(_.critical)
+            }
+
+            val result = if (blockedByFailedDep) {
+              Skipped
+            } else {
+              val start = System.currentTimeMillis()
+              val r = executeWithRetry(task)
+              durations.put(task.id, System.currentTimeMillis() - start)
+              r
+            }
+
             statusMap.put(task.id, result)
-            if (result == Completed) {
-              writeCheckpoint(task.id)
+            if (result == Completed || result.isInstanceOf[CompletedWithWarning]) {
+              writeCheckpoint(task.id, durations.getOrDefault(task.id, 0L))
             }
             val done = completedCount.incrementAndGet()
             logger.info(s"  DAG progress: $done/$totalTasks — ${task.id}: $result")
@@ -100,22 +122,41 @@ class DagExecutor(
     statusMap.asScala.toMap
   }
 
-  /** Ejecuta una task con retry y backoff exponencial */
+  /** Ejecuta una task con retry y backoff exponencial. Respeta error tipado. */
   private def executeWithRetry(task: DagTask): TaskStatus = {
     var attempt = 0
     var lastError: Throwable = null
 
     while (attempt < task.retryCount) {
       try {
-        task.execute()
-        return Completed
+        task.execute() match {
+          case Right(_) =>
+            return Completed
+
+          case Left(TaskError.Skippable(msg, _)) =>
+            logger.warn(s"  ⚠ DAG: ${task.id} — completado con warning: $msg")
+            return CompletedWithWarning(msg)
+
+          case Left(TaskError.Fatal(msg, cause)) =>
+            logger.error(s"  ✗ DAG: ${task.id} — error fatal (no retry): $msg")
+            return Failed(cause.getOrElse(new RuntimeException(msg)))
+
+          case Left(TaskError.Transient(msg, cause)) =>
+            attempt += 1
+            lastError = cause.getOrElse(new RuntimeException(msg))
+            if (attempt < task.retryCount) {
+              val backoffMs = 2000L * attempt
+              logger.warn(s"  ⚠ DAG: ${task.id} — intento $attempt/${task.retryCount} falló (transient): $msg. Retry en ${backoffMs}ms")
+              Thread.sleep(backoffMs)
+            }
+        }
       } catch {
-        case e: Throwable =>
+        case NonFatal(e) =>
           attempt += 1
           lastError = e
           if (attempt < task.retryCount) {
             val backoffMs = 2000L * attempt
-            logger.warn(s"  ⚠ DAG: ${task.id} — intento $attempt/${task.retryCount} falló. Retry en ${backoffMs}ms")
+            logger.warn(s"  ⚠ DAG: ${task.id} — intento $attempt/${task.retryCount} excepción. Retry en ${backoffMs}ms")
             Thread.sleep(backoffMs)
           }
       }
@@ -147,17 +188,34 @@ class DagExecutor(
     logger.info(s"  ✔ DAG validated: ${tasks.length} tasks, no cycles")
   }
 
-  /** Checkpoint helpers */
+  // ═══════════════════════════════════════════════════
+  // Checkpoint con metadatos JSON
+  // ═══════════════════════════════════════════════════
+
   private def isCheckpointed(taskId: String): Boolean = {
     if (checkpointPath.isEmpty) return false
-    new java.io.File(s"$checkpointPath/.dag_$taskId").exists()
+    new java.io.File(s"$checkpointPath/.dag_$taskId.json").exists() ||
+      new java.io.File(s"$checkpointPath/.dag_$taskId").exists() // backward compat
   }
 
-  private def writeCheckpoint(taskId: String): Unit = {
+  private def writeCheckpoint(taskId: String, durationMs: Long = 0L): Unit = {
     if (checkpointPath.isEmpty) return
     val dir = new java.io.File(checkpointPath)
     if (!dir.exists()) dir.mkdirs()
-    new java.io.PrintWriter(s"$checkpointPath/.dag_$taskId").close()
+
+    val timestamp = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss").format(new java.util.Date())
+    val desc = taskMap.get(taskId).map(_.description).getOrElse("")
+    val json =
+      s"""{
+  "task": "$taskId",
+  "status": "completed",
+  "timestamp": "$timestamp",
+  "duration_ms": $durationMs,
+  "description": "$desc"
+}"""
+
+    val writer = new java.io.PrintWriter(s"$checkpointPath/.dag_$taskId.json")
+    try { writer.write(json) } finally { writer.close() }
   }
 
   /** Imprime resumen de ejecución del DAG */
@@ -169,30 +227,34 @@ class DagExecutor(
 
     val statuses = statusMap.asScala.toSeq.sortBy(_._1)
     val completed = statuses.count(_._2 == Completed)
+    val warnings = statuses.count(_._2.isInstanceOf[CompletedWithWarning])
     val skipped = statuses.count(_._2 == Skipped)
     val failed = statuses.count { case (_, s) => s.isInstanceOf[Failed] }
     val pending = statuses.count(_._2 == Pending)
 
     statuses.foreach { case (id, status) =>
       val icon = status match {
-        case Completed => "✔"
-        case Skipped   => "⏭"
-        case Failed(_) => "✗"
-        case Running   => "⏳"
-        case Pending   => "○"
+        case Completed                => "✔"
+        case CompletedWithWarning(_)  => "⚠"
+        case Skipped                  => "⏭"
+        case Failed(_)                => "✗"
+        case Running                  => "⏳"
+        case Pending                  => "○"
       }
+      val durationStr = Option(durations.get(id)).map(d => f" (${d / 1000.0}%.2fs)").getOrElse("")
       val statusName = status match {
-        case Completed => "Completed"
-        case Skipped   => "Skipped"
-        case Failed(e) => s"Failed(${e.getMessage.take(30)})"
-        case Running   => "Running"
-        case Pending   => "Pending"
+        case Completed                 => "Completed"
+        case CompletedWithWarning(msg) => s"Warning($msg)"
+        case Skipped                   => "Skipped"
+        case Failed(e)                 => s"Failed(${e.getMessage.take(30)})"
+        case Running                   => "Running"
+        case Pending                   => "Pending"
       }
-      println(s"║  $icon $id — $statusName")
+      println(s"║  $icon $id — $statusName$durationStr")
     }
 
     println("╠══════════════════════════════════════════════════════════════╣")
-    println(f"║  Completed: $completed  |  Skipped: $skipped  |  Failed: $failed  |  Pending: $pending")
+    println(f"║  Completed: $completed  |  Warnings: $warnings  |  Skipped: $skipped  |  Failed: $failed  |  Pending: $pending")
     println("╚══════════════════════════════════════════════════════════════╝")
     println()
   }
