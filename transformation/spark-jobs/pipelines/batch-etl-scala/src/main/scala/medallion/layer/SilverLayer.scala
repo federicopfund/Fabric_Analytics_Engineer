@@ -3,13 +3,19 @@ package medallion.layer
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions._
 import org.apache.log4j.Logger
-import medallion.infra.DataLakeIO
+import medallion.infra.{DataLakeIO, ViewScope}
+import medallion.config.TableRegistry
 
 /**
  * SILVER LAYER — Lógica de negocio (Bronze → Silver).
  * Genera tablas analíticas con joins, cálculos financieros,
  * segmentación RFM y métricas operativas.
  * Dominio Retail + Mining.
+ *
+ * Mejoras v4:
+ *   - ViewScope loan pattern para gestión automática de vistas
+ *   - TableRegistry como fuente de nombres de tablas
+ *   - Eliminado System.gc() manual
  */
 object SilverLayer {
 
@@ -20,46 +26,21 @@ object SilverLayer {
     logger.info("  SILVER LAYER — Business Logic")
     logger.info("═══════════════════════════════════════")
 
-    registerBronzeTables(spark, bronzePath)
+    ViewScope.withBronzeViews(spark, bronzePath, TableRegistry.bronzeNames) {
+      // --- RETAIL DOMAIN ---
+      buildCatalogoProductos(spark, silverPath)
+      buildVentasEnriquecidas(spark, silverPath)
+      buildResumenVentasMensuales(spark, silverPath)
+      buildRentabilidadProducto(spark, silverPath)
+      buildSegmentacionClientes(spark, silverPath)
 
-    // --- RETAIL DOMAIN ---
-    buildCatalogoProductos(spark, silverPath)
-    buildVentasEnriquecidas(spark, silverPath)
-    buildResumenVentasMensuales(spark, silverPath)
-    buildRentabilidadProducto(spark, silverPath)
-    buildSegmentacionClientes(spark, silverPath)
-
-    // --- MINING DOMAIN ---
-    buildProduccionOperador(spark, silverPath)
-    buildEficienciaMinera(spark, silverPath)
-    buildProduccionPorPais(spark, silverPath)
-
-    dropBronzeViews(spark)
+      // --- MINING DOMAIN ---
+      buildProduccionOperador(spark, silverPath)
+      buildEficienciaMinera(spark, silverPath)
+      buildProduccionPorPais(spark, silverPath)
+    }
 
     logger.info("✔ SILVER LAYER completada")
-  }
-
-  private def dropBronzeViews(spark: SparkSession): Unit = {
-    val views = Seq("categoria", "subcategoria", "producto", "ventasinternet", "sucursales", "factmine", "mine")
-    views.foreach { v =>
-      try { spark.catalog.dropTempView(v) } catch { case _: Exception => () }
-    }
-    spark.catalog.clearCache()
-    System.gc()
-    logger.info("  ✔ Bronze temp views liberadas")
-  }
-
-  private def registerBronzeTables(spark: SparkSession, bronzePath: String): Unit = {
-    val tables = Seq("categoria", "subcategoria", "producto", "ventasinternet", "sucursales", "factmine", "mine")
-    tables.foreach { table =>
-      val path = s"$bronzePath/$table"
-      if (DataLakeIO.pathExists(path)) {
-        spark.read.parquet(path).createOrReplaceTempView(table)
-        logger.info(s"  ✓ Vista registrada: $table")
-      } else {
-        logger.warn(s"  ✗ Tabla bronze no encontrada: $table")
-      }
-    }
   }
 
   private def buildCatalogoProductos(spark: SparkSession, silverPath: String): Unit = {
