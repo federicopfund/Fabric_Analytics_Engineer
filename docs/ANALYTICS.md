@@ -20,7 +20,7 @@ export HDFS_URI="hdfs://localhost:9000"   # o vacío para modo local
 sbt "runMain main.AnalyticsRunner"
 ```
 
-**Output:** `docs/analytics/*.png`
+**Output:** `docs/analytics/images/*.png`
 
 ---
 
@@ -28,7 +28,7 @@ sbt "runMain main.AnalyticsRunner"
 
 ### 01 — Ingreso Bruto por Categoría de Producto
 
-![Ingreso Bruto por Categoría](analytics/01_ingresos_por_categoria.png)
+![Ingreso Bruto por Categoría](analytics/images/01_ingresos_por_categoria.png)
 
 **Tabla Gold:** `kpi_ventas_mensuales` | **Tipo:** Barras horizontales
 
@@ -40,7 +40,7 @@ sbt "runMain main.AnalyticsRunner"
 
 ### 02 — Tendencia de Margen Bruto Mensual por Categoría
 
-![Tendencia Margen Mensual](analytics/02_margen_mensual_tendencia.png)
+![Tendencia Margen Mensual](analytics/images/02_margen_mensual_tendencia.png)
 
 **Tabla Gold:** `kpi_ventas_mensuales` | **Tipo:** Líneas temporales
 
@@ -52,7 +52,7 @@ sbt "runMain main.AnalyticsRunner"
 
 ### 03 — Segmentación de Clientes (Análisis RFM)
 
-![Segmentación Clientes](analytics/03_segmentacion_clientes.png)
+![Segmentación Clientes](analytics/images/03_segmentacion_clientes.png)
 
 **Tabla Gold:** `dim_cliente` | **Tipo:** Gráfico de torta
 
@@ -64,7 +64,7 @@ sbt "runMain main.AnalyticsRunner"
 
 ### 04 — Top 10 Productos por Revenue Total
 
-![Top 10 Productos](analytics/04_top10_productos_revenue.png)
+![Top 10 Productos](analytics/images/04_top10_productos_revenue.png)
 
 **Tabla Gold:** `dim_producto` | **Tipo:** Barras verticales con categoría
 
@@ -76,7 +76,7 @@ sbt "runMain main.AnalyticsRunner"
 
 ### 05 — Clasificación de Rentabilidad del Portafolio
 
-![Clasificación Rentabilidad](analytics/05_clasificacion_rentabilidad.png)
+![Clasificación Rentabilidad](analytics/images/05_clasificacion_rentabilidad.png)
 
 **Tabla Gold:** `dim_producto` | **Tipo:** Gráfico de torta
 
@@ -88,7 +88,7 @@ sbt "runMain main.AnalyticsRunner"
 
 ### 06 — Variación Month-over-Month de Ingresos (%)
 
-![Variación MoM](analytics/06_ventas_mom_variacion.png)
+![Variación MoM](analytics/images/06_ventas_mom_variacion.png)
 
 **Tabla Gold:** `kpi_ventas_mensuales` | **Tipo:** Barras agrupadas por categoría
 
@@ -100,7 +100,7 @@ sbt "runMain main.AnalyticsRunner"
 
 ### 10 — Evolución del Ticket Promedio Mensual
 
-![Ticket Promedio](analytics/10_ticket_promedio_mensual.png)
+![Ticket Promedio](analytics/images/10_ticket_promedio_mensual.png)
 
 **Tabla Gold:** `kpi_ventas_mensuales` | **Tipo:** Líneas temporales por categoría
 
@@ -114,7 +114,7 @@ sbt "runMain main.AnalyticsRunner"
 
 ### 07 — Producción Minera por País: Mineral vs Desperdicio
 
-![Producción por País](analytics/07_produccion_minera_por_pais.png)
+![Producción por País](analytics/images/07_produccion_minera_por_pais.png)
 
 **Tabla Gold:** `kpi_mineria` | **Tipo:** Barras agrupadas (mineral, desperdicio, neto)
 
@@ -126,7 +126,7 @@ sbt "runMain main.AnalyticsRunner"
 
 ### 08 — Distribución de Eficiencia de Operadores Mineros
 
-![Eficiencia Operadores](analytics/08_eficiencia_operadores.png)
+![Eficiencia Operadores](analytics/images/08_eficiencia_operadores.png)
 
 **Tabla Gold:** `dim_operador` | **Tipo:** Barras de distribución
 
@@ -138,7 +138,7 @@ sbt "runMain main.AnalyticsRunner"
 
 ### 09 — Eficiencia Operativa: Aprovechamiento vs Desperdicio por País
 
-![Desperdicio vs Producción](analytics/09_desperdicio_vs_produccion.png)
+![Desperdicio vs Producción](analytics/images/09_desperdicio_vs_produccion.png)
 
 **Tabla Gold:** `kpi_mineria` | **Tipo:** Barras apiladas al 100%
 
@@ -187,15 +187,16 @@ transformation/spark-jobs/pipelines/batch-etl-scala/
         └── AnalyticsRunner.scala   ← Runner standalone
 
 docs/
-└── analytics/                      ← Output de gráficos PNG
-    ├── 01_ingresos_por_categoria.png
-    ├── 02_margen_mensual_tendencia.png
-    ├── 03_segmentacion_clientes.png
-    ├── 04_top10_productos_revenue.png
-    ├── 05_clasificacion_rentabilidad.png
-    ├── 06_ventas_mom_variacion.png
-    ├── 07_produccion_minera_por_pais.png
-    ├── 08_eficiencia_operadores.png
-    ├── 09_desperdicio_vs_produccion.png
-    └── 10_ticket_promedio_mensual.png
+└── analytics/
+    └── images/                     ← Output de gráficos PNG
+        ├── 01_ingresos_por_categoria.png
+        ├── 02_margen_mensual_tendencia.png
+        ├── 03_segmentacion_clientes.png
+        ├── 04_top10_productos_revenue.png
+        ├── 05_clasificacion_rentabilidad.png
+        ├── 06_ventas_mom_variacion.png
+        ├── 07_produccion_minera_por_pais.png
+        ├── 08_eficiencia_operadores.png
+        ├── 09_desperdicio_vs_produccion.png
+        └── 10_ticket_promedio_mensual.png
 ```
