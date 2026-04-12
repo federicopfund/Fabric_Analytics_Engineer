@@ -1,58 +1,186 @@
-version: "3"
+version: "3.8"
 
 services:
+  # ============================================================
+  # HADOOP HDFS — NameNode
+  # ============================================================
   namenode:
-    image: sequenceiq/hadoop-docker:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: namenode
-    expose:
-      - "50070"
+    hostname: namenode
+    environment:
+      - CLUSTER_NAME=lakehouse
+      - HDFS_CONF_dfs_namenode_name_dir=/hadoop/dfs/name
+      - HDFS_CONF_dfs_replication=1
     ports:
-      - "50070:50070"
-    command: /etc/bootstrap.sh -d -namenode
-    networks:
-      - hadoop-net
+      - "9870:9870"   # NameNode Web UI
+      - "9000:9000"   # HDFS RPC
     volumes:
-      - /home/fede/data-engineer/transformation/spark-jobs/pipelines/batch-etl-scala/src/main/resources/csv:/mnt/volumen  # Montar directorio de Documentos en Ubuntu al contenedor
+      - namenode_data:/hadoop/dfs/name
+      - ./conf/core-site.xml:/usr/local/hadoop/etc/hadoop/core-site.xml
+      - ./conf/hdfs-site.xml:/usr/local/hadoop/etc/hadoop/hdfs-site.xml
+      - ../../transformation/spark-jobs/pipelines/batch-etl-scala/src/main/resources/csv:/mnt/csv-data
+    networks:
+      - lakehouse-net
+    healthcheck:
+      test: ["CMD", "hdfs", "dfsadmin", "-safemode", "get"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
+  # ============================================================
+  # HADOOP HDFS — DataNode
+  # ============================================================
   datanode:
-    image: sequenceiq/hadoop-docker:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: datanode
-    expose:
-      - "50075"
+    hostname: datanode
+    environment:
+      - HDFS_CONF_dfs_datanode_data_dir=/hadoop/dfs/data
+      - HDFS_CONF_dfs_datanode_hostname=localhost
     ports:
-      - "50075:50075"
-    links:
-      - namenode
-    command: /etc/bootstrap.sh -d -datanode
+      - "9864:9864"   # DataNode Web UI
+      - "9866:9866"   # DataNode data transfer
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+      - ./conf/core-site.xml:/usr/local/hadoop/etc/hadoop/core-site.xml
+      - ./conf/hdfs-site.xml:/usr/local/hadoop/etc/hadoop/hdfs-site.xml
+    depends_on:
+      namenode:
+        condition: service_healthy
     networks:
-      - hadoop-net
+      - lakehouse-net
 
+  # ============================================================
+  # YARN — ResourceManager
+  # ============================================================
   resourcemanager:
-    image: sequenceiq/hadoop-docker:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: resourcemanager
-    expose:
-      - "8088"
+    hostname: resourcemanager
     ports:
-      - "8088:8088"
-    links:
-      - namenode
-    command: /etc/bootstrap.sh -d -resourcemanager
+      - "8088:8088"   # YARN Web UI
+    volumes:
+      - ./conf/core-site.xml:/usr/local/hadoop/etc/hadoop/core-site.xml
+      - ./conf/hdfs-site.xml:/usr/local/hadoop/etc/hadoop/hdfs-site.xml
+      - ./conf/mapred-site.xml:/usr/local/hadoop/etc/hadoop/mapred-site.xml
+      - ./conf/yarn-site.xml:/usr/local/hadoop/etc/hadoop/yarn-site.xml
+    depends_on:
+      namenode:
+        condition: service_healthy
     networks:
-      - hadoop-net
+      - lakehouse-net
 
+  # ============================================================
+  # YARN — NodeManager
+  # ============================================================
   nodemanager:
-    image: sequenceiq/hadoop-docker:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: nodemanager
-    expose:
-      - "8042"
+    hostname: nodemanager
     ports:
-      - "8042:8042"
-    links:
-      - namenode
-    command: /etc/bootstrap.sh -d -nodemanager
+      - "8042:8042"   # NodeManager Web UI
+    volumes:
+      - ./conf/core-site.xml:/usr/local/hadoop/etc/hadoop/core-site.xml
+      - ./conf/hdfs-site.xml:/usr/local/hadoop/etc/hadoop/hdfs-site.xml
+      - ./conf/mapred-site.xml:/usr/local/hadoop/etc/hadoop/mapred-site.xml
+      - ./conf/yarn-site.xml:/usr/local/hadoop/etc/hadoop/yarn-site.xml
+    depends_on:
+      - resourcemanager
     networks:
-      - hadoop-net
+      - lakehouse-net
+
+  # ============================================================
+  # HIVE — Metastore (MySQL-backed)
+  # ============================================================
+  hive-metastore-db:
+    image: mysql:5.7
+    container_name: hive-metastore-db
+    hostname: hive-metastore-db
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: metastore
+      MYSQL_USER: hive
+      MYSQL_PASSWORD: hive_password
+    ports:
+      - "3307:3306"
+    volumes:
+      - hive_metastore_db:/var/lib/mysql
+    networks:
+      - lakehouse-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_password"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  hive-metastore:
+    image: apache/hive:3.1.3
+    container_name: hive-metastore
+    hostname: hive-metastore
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: mysql
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=com.mysql.jdbc.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:mysql://hive-metastore-db:3306/metastore?createDatabaseIfNotExist=true&useSSL=false
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hive_password
+    ports:
+      - "9083:9083"   # Thrift Metastore
+    volumes:
+      - ./conf/core-site.xml:/opt/hive/conf/core-site.xml
+      - ./conf/hdfs-site.xml:/opt/hive/conf/hdfs-site.xml
+      - ./conf/hive-site.xml:/opt/hive/conf/hive-site.xml
+      - ./lib/mysql-connector-java-5.1.49.jar:/opt/hive/lib/mysql-connector-java-5.1.49.jar
+    depends_on:
+      hive-metastore-db:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    networks:
+      - lakehouse-net
+
+  # ============================================================
+  # HIVE — HiveServer2 (JDBC/Beeline interface)
+  # ============================================================
+  hiveserver2:
+    image: apache/hive:3.1.3
+    container_name: hiveserver2
+    hostname: hiveserver2
+    environment:
+      SERVICE_NAME: hiveserver2
+      HIVE_SERVER2_THRIFT_PORT: 10000
+      IS_RESUME: "true"
+      SERVICE_OPTS: >-
+        -Dhive.metastore.uris=thrift://hive-metastore:9083
+    ports:
+      - "10000:10000"  # HiveServer2 Thrift
+      - "10002:10002"  # HiveServer2 Web UI
+    volumes:
+      - ./conf/core-site.xml:/opt/hive/conf/core-site.xml
+      - ./conf/hdfs-site.xml:/opt/hive/conf/hdfs-site.xml
+      - ./conf/hive-site.xml:/opt/hive/conf/hive-site.xml
+      - ./lib/mysql-connector-java-5.1.49.jar:/opt/hive/lib/mysql-connector-java-5.1.49.jar
+    depends_on:
+      - hive-metastore
+    networks:
+      - lakehouse-net
+
+volumes:
+  namenode_data:
+  datanode_data:
+  hive_metastore_db:
 
 networks:
-  hadoop-net:
-    external: true
+  lakehouse-net:
+    name: lakehouse-net
+    driver: bridge

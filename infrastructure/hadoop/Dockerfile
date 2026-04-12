@@ -1,33 +1,70 @@
-# Utiliza una imagen base de Hadoop
-FROM sequenceiq/hadoop-docker:latest
+# ============================================================
+# Hadoop 3.3.4 + Java 11 — Lakehouse Base Image
+# ============================================================
+FROM eclipse-temurin:11-jre-focal
 
-# Etiqueta para especificar al creador de la imagen y proporcionar una descripción
-LABEL maintainer="SequenceIQ <federicopfund@gmail.com>" \
-      description="Imagen de Hadoop con configuraciones personalizadas"
+LABEL maintainer="Federico Pfund <federicopfund@gmail.com>" \
+      description="Hadoop 3.3.4 Lakehouse node with HDFS, YARN, and Hive support"
 
-# Configura las variables de entorno para Hadoop
-ENV HADOOP_HOME /usr/local/hadoop
-ENV HADOOP_CONF_DIR /usr/local/hadoop/etc/hadoop
-ENV PATH $PATH:$HADOOP_HOME/bin
+# Instalar dependencias del sistema
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ssh \
+    rsync \
+    procps \
+    net-tools \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copia la configuración personalizada de Hadoop
-COPY conf/core-site.xml $HADOOP_CONF_DIR/core-site.xml
-COPY conf/hdfs-site.xml $HADOOP_CONF_DIR/hdfs-site.xml
-COPY conf/mapred-site.xml $HADOOP_CONF_DIR/mapred-site.xml
-COPY conf/yarn-site.xml $HADOOP_CONF_DIR/yarn-site.xml
+# Variables de entorno
+ENV HADOOP_VERSION=3.3.4
+ENV HADOOP_HOME=/opt/hadoop
+ENV HADOOP_CONF_DIR=${HADOOP_HOME}/etc/hadoop
+ENV PATH=${PATH}:${HADOOP_HOME}/bin:${HADOOP_HOME}/sbin
+ENV JAVA_HOME=/opt/java/openjdk
+ENV HDFS_NAMENODE_USER=root
+ENV HDFS_DATANODE_USER=root
+ENV HDFS_SECONDARYNAMENODE_USER=root
+ENV YARN_RESOURCEMANAGER_USER=root
+ENV YARN_NODEMANAGER_USER=root
 
-# Copia la configuración personalizada de Hadoop a las plantillas
-COPY conf/core-site.xml $HADOOP_HOME/share/hadoop/common/templates/core-site.xml
-COPY conf/hdfs-site.xml $HADOOP_HOME/share/hadoop/hdfs/templates/hdfs-site.xml
-COPY conf/mapred-site.xml $HADOOP_HOME/share/hadoop/mapreduce/templates/mapred-site.xml
-COPY conf/yarn-site.xml $HADOOP_HOME/share/hadoop/yarn/templates/yarn-site.xml
+# Descargar e instalar Hadoop
+RUN curl -fsSL https://archive.apache.org/dist/hadoop/common/hadoop-${HADOOP_VERSION}/hadoop-${HADOOP_VERSION}.tar.gz \
+    | tar -xz -C /opt/ \
+    && mv /opt/hadoop-${HADOOP_VERSION} ${HADOOP_HOME}
 
-# Formatea el sistema de archivos HDFS
-# RUN $HADOOP_HOME/bin/hdfs namenode -format
+# Configurar SSH sin password (necesario para start-dfs.sh)
+RUN ssh-keygen -t rsa -P '' -f ~/.ssh/id_rsa \
+    && cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys \
+    && chmod 0600 ~/.ssh/authorized_keys
 
-# Agrega volúmenes de persistencia para los datos de Hadoop
-VOLUME /usr/local/hadoop-data
+# Copiar configuraciones de Hadoop
+COPY conf/core-site.xml ${HADOOP_CONF_DIR}/core-site.xml
+COPY conf/hdfs-site.xml ${HADOOP_CONF_DIR}/hdfs-site.xml
+COPY conf/mapred-site.xml ${HADOOP_CONF_DIR}/mapred-site.xml
+COPY conf/yarn-site.xml ${HADOOP_CONF_DIR}/yarn-site.xml
 
-# Establece el directorio de trabajo
-WORKDIR $HADOOP_HOME
+# Crear directorios de datos
+RUN mkdir -p /hadoop/dfs/name /hadoop/dfs/data /opt/hadoop/tmp /opt/hadoop/logs
+
+# Formatear NameNode
+RUN ${HADOOP_HOME}/bin/hdfs namenode -format -force -nonInteractive
+
+# Volúmenes de persistencia
+VOLUME ["/hadoop/dfs/name", "/hadoop/dfs/data"]
+
+# Puertos expuestos
+# 9870: NameNode Web UI
+# 9864: DataNode Web UI
+# 9000: HDFS RPC
+# 8088: YARN ResourceManager
+# 8042: YARN NodeManager
+EXPOSE 9870 9864 9000 8088 8042
+
+WORKDIR ${HADOOP_HOME}
+
+# Script de inicio
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
 
