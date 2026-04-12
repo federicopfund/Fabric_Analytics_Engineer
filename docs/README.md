@@ -1,6 +1,6 @@
 # Batch ETL Scala — Lakehouse Medallion Pipeline
 
-Motor de procesamiento de datos empresarial implementado en **Scala 2.12 + Apache Spark 3.3.1 + Delta Lake 2.2.0**. Ejecuta un pipeline ETL completo con arquitectura Medallion (RAW → Bronze → Silver → Gold), workflows paralelos de calidad/lineage/analytics, auditoría Hive y generación de gráficos BI.
+Motor de procesamiento de datos empresarial implementado en **Scala 2.12 + Apache Spark 3.3.1 + Delta Lake 2.2.0**. Ejecuta un pipeline ETL completo con arquitectura Medallion (RAW → Bronze → Silver → Gold), orquestado por un DAG declarativo con errores tipados, retry automático y checkpoint con metadatos JSON. Incluye workflows paralelos de calidad/lineage/analytics, Dead Letter Queue, Circuit Breaker para IO, loan pattern para vistas Spark, auditoría Hive y generación de gráficos BI.
 
 ---
 
@@ -21,6 +21,7 @@ Motor de procesamiento de datos empresarial implementado en **Scala 2.12 + Apach
    - [analytics/ — Generación BI](#analytics--generación-bi)
 6. [Flujo de Datos por Capa](#flujo-de-datos-por-capa)
 7. [Modelos de Datos](#modelos-de-datos)
+8. [Changelog v4.0](#changelog-v40)
 
 ---
 
@@ -37,22 +38,25 @@ batch-etl-scala/
 │   │   ├── hdfs/                      ← Configuraciones HDFS
 │   │   └── log4j.properties           ← Configuración de logging
 │   └── scala/medallion/
-│       ├── Pipeline.scala             ← Orquestador principal v3.0
+│       ├── Pipeline.scala             ← Orquestador declarativo v4.0 (DAG)
 │       ├── config/
 │       │   ├── DatalakeConfig.scala   ← Modelo de configuración inmutable
-│       │   └── SparkFactory.scala     ← Fábrica singleton de SparkSession
+│       │   ├── SparkFactory.scala     ← Fábrica singleton de SparkSession
+│       │   └── TableRegistry.scala    ← Fuente única de verdad para tablas
 │       ├── schema/
 │       │   └── CsvSchemas.scala       ← Esquemas StructType para ingesta
 │       ├── infra/
 │       │   ├── DataLakeIO.scala       ← Lectura/escritura Parquet, Delta, CSV
-│       │   └── HdfsManager.scala      ← Gestión HDFS y estructura datalake
+│       │   ├── HdfsManager.scala      ← Gestión HDFS y estructura datalake
+│       │   ├── CircuitBreaker.scala   ← Protección contra fallos sistémicos IO
+│       │   └── ViewScope.scala        ← Loan pattern para vistas temporales
 │       ├── engine/
-│       │   ├── DagTask.scala          ← Modelo de nodo del DAG
-│       │   └── DagExecutor.scala      ← Motor de ejecución paralela con DAG
+│       │   ├── DagTask.scala          ← Nodo DAG con errores tipados
+│       │   └── DagExecutor.scala      ← Motor paralelo con checkpoint JSON
 │       ├── layer/
-│       │   ├── BronzeLayer.scala      ← Ingesta y limpieza (RAW → Bronze)
-│       │   ├── SilverLayer.scala      ← Lógica de negocio (Bronze → Silver)
-│       │   └── GoldLayer.scala        ← Star Schema y KPIs (Silver → Gold)
+│       │   ├── BronzeLayer.scala      ← Ingesta + DLQ (RAW → Bronze)
+│       │   ├── SilverLayer.scala      ← Lógica de negocio + ViewScope
+│       │   └── GoldLayer.scala        ← Star Schema + ViewScope (Delta)
 │       ├── workflow/
 │       │   ├── EtlWorkflow.scala      ← WF1: Orquestación ETL completa
 │       │   ├── AnalyticsWorkflow.scala← WF2: Generación de gráficos BI
@@ -71,22 +75,25 @@ batch-etl-scala/
 ```mermaid
 graph TB
     subgraph Entry["Punto de Entrada"]
-        PIPE["Pipeline.scala<br/>Orquestador v3.0"]
+        PIPE["Pipeline.scala<br/>Orquestador v4.0 (DAG)"]
     end
 
     subgraph Config["config/"]
         DC["DatalakeConfig<br/>case class inmutable"]
         SF["SparkFactory<br/>Singleton SparkSession"]
+        TR["TableRegistry<br/>Fuente única de tablas"]
     end
 
     subgraph Infra["infra/"]
         DLIO["DataLakeIO<br/>CSV · Parquet · Delta"]
         HDFS["HdfsManager<br/>HDFS · Estructura · Upload"]
+        CB["CircuitBreaker<br/>Closed · Open · HalfOpen"]
+        VS["ViewScope<br/>Loan pattern vistas"]
     end
 
     subgraph Engine["engine/"]
-        DT["DagTask<br/>Nodo del DAG"]
-        DE["DagExecutor<br/>Parallelism · Retry"]
+        DT["DagTask<br/>Errores tipados · critical"]
+        DE["DagExecutor<br/>NonFatal · JSON checkpoint"]
     end
 
     subgraph Schema["schema/"]
@@ -112,17 +119,19 @@ graph TB
         BIC["BIChartGenerator<br/>JFreeChart · 10 PNG"]
     end
 
-    PIPE --> DC & SF
-    PIPE --> WF1 & WF2 & WF3 & WF4 & WF5 & WF6
+    PIPE --> DC & SF & TR
+    PIPE --> DE
+    DE --> DT
+    DE --> WF1 & WF2 & WF3 & WF4 & WF5 & WF6
 
     WF1 --> BL & SL & GL
     WF2 --> BIC
 
     BL & SL & GL --> DLIO
-    BL --> CS
-    DLIO --> HDFS
-
-    DE --> DT
+    BL --> CS & TR
+    SL --> VS
+    GL --> VS
+    DLIO --> HDFS & CB
 
     style PIPE fill:#e25a1c,color:#fff
     style BL fill:#cd7f32,color:#fff
@@ -173,16 +182,24 @@ export ANALYTICS_OUT="./src/main/resources/analytics"
 
 > [`src/main/scala/medallion/Pipeline.scala`](src/main/scala/medallion/Pipeline.scala)
 
-Punto de entrada del sistema. Orquesta 6 workflows en 4 fases con retry, checkpoint y paralelismo controlado.
+Punto de entrada del sistema. Define un DAG declarativo de 6 tasks con dependencias que el `DagExecutor` resuelve automáticamente. Retry, checkpoint y paralelismo se delegan al motor DAG.
 
 **Funciones clave:**
 
 | Función | Tipo | Descripción |
 |---------|------|-------------|
-| `main(args)` | Entry point | Detecta entorno, inicializa Spark, ejecuta fases |
-| `withRetry(name, critical, maxRetries)(body)` | Resiliencia | Retry con backoff exponencial (2s, 4s, 6s) |
-| `isCheckpointed(path, stage)` | Checkpoint | Verifica si un stage ya fue completado |
-| `writeCheckpoint(path, stage)` | Checkpoint | Persiste `.checkpoint_<STAGE>` al filesystem |
+| `main(args)` | Entry point | Detecta entorno, inicializa Spark, define DAG, ejecuta |
+
+**Tasks del DAG:**
+
+| Task ID | Dependencias | Critical | Descripción |
+|---------|-------------|----------|-------------|
+| `ETL` | ∅ | ✔ | Bronze → Silver → Gold completo |
+| `QUALITY` | `ETL` | ✗ | Validación de calidad por capa |
+| `LINEAGE` | `ETL` | ✗ | Captura de linaje de datos |
+| `ANALYTICS` | `ETL` | ✗ | Generación de gráficos BI |
+| `HIVE_AUDIT` | `QUALITY`, `LINEAGE` | ✗ | Verificación catálogo Hive |
+| `METRICS` | `QUALITY`, `LINEAGE`, `ANALYTICS`, `HIVE_AUDIT` | ✔ | Reporte final de métricas |
 
 ```mermaid
 flowchart TB
@@ -194,48 +211,45 @@ flowchart TB
     HDFS_MODE --> SPARK["SparkFactory.getOrCreate"]
     LOCAL_MODE --> SPARK
 
-    SPARK --> POOL["ExecutorService<br/>newFixedThreadPool(2)"]
+    SPARK --> DAG_DEF["Definir DAG declarativo<br/>6 tasks con dependencias"]
 
-    POOL --> FASE1
+    DAG_DEF --> EXECUTOR["DagExecutor(tasks, parallelism=3)"]
 
-    subgraph FASE1["FASE 1 — Secuencial"]
-        CHK1{"checkpoint<br/>ETL?"} -->|skip| FASE2_START
-        CHK1 -->|no| RETRY1["withRetry(WF1:ETL, critical=true)"]
-        RETRY1 --> ETL["EtlWorkflow.run(spark, config)<br/>Bronze → Silver → Gold"]
-        ETL --> CP1["writeCheckpoint(ETL)"]
-        CP1 --> FASE2_START[" "]
+    EXECUTOR --> DAG_EXEC
+
+    subgraph DAG_EXEC["DAG Execution — Resuelto por DagExecutor"]
+        ETL["ETL<br/>EtlWorkflow.run<br/>Bronze → Silver → Gold"]
+
+        ETL --> FORK{{"Paralelo (3 threads)"}}
+        FORK --> QUALITY["QUALITY<br/>DataQualityWorkflow<br/>critical=false"]
+        FORK --> LINEAGE["LINEAGE<br/>LineageWorkflow<br/>critical=false"]
+        FORK --> ANALYTICS["ANALYTICS<br/>AnalyticsWorkflow<br/>critical=false"]
+
+        QUALITY & LINEAGE --> HIVE["HIVE_AUDIT<br/>HiveWorkflow<br/>critical=false"]
+
+        QUALITY & LINEAGE & ANALYTICS & HIVE --> METRICS["METRICS<br/>MetricsWorkflow<br/>Reporte final"]
     end
 
-    FASE2_START --> FORK
+    EXECUTOR --> SUMMARY["Resumen v4.0"]
 
-    subgraph FASE2["FASE 2 — Paralelo (Future.sequence)"]
-        FORK{{"Future.sequence<br/>3 concurrent"}}
-        FORK --> F1["Future 1<br/>DataQualityWorkflow<br/>.validateLayer × 3"]
-        FORK --> F2["Future 2<br/>LineageWorkflow<br/>.captureLayerLineage × 3"]
-        FORK --> F3["Future 3<br/>AnalyticsWorkflow<br/>.run"]
-    end
-
-    F1 & F2 & F3 --> BARRIER{{"Await.result<br/>timeout 10 min"}}
-
-    BARRIER --> FASE3
-
-    subgraph FASE3["FASE 3 — Condicional"]
-        CHK3{"hiveEnabled<br/>AND no checkpoint?"}
-        CHK3 -->|Sí| HIVE["withRetry(WF3:HiveAudit)<br/>HiveWorkflow.run"]
-        CHK3 -->|No| SKIP3[" "]
-    end
-
-    HIVE & SKIP3 --> FASE4
-
-    subgraph FASE4["FASE 4 — Métricas"]
-        METRICS["MetricsWorkflow<br/>.generateReport<br/>.exportMetrics"]
-    end
-
-    style FASE1 fill:#fff3e0
-    style FASE2 fill:#e3f2fd
-    style FASE3 fill:#f3e5f5
-    style FASE4 fill:#e8f5e9
+    style DAG_EXEC fill:#e3f2fd
+    style ETL fill:#fff3e0
+    style QUALITY fill:#e8f5e9
+    style LINEAGE fill:#e8f5e9
+    style ANALYTICS fill:#e8f5e9
 ```
+
+**v4.0 vs v3.0:**
+
+| Aspecto | v3.0 | v4.0 |
+|---------|------|------|
+| Orquestación | Imperativa (~190 líneas, Future.sequence) | Declarativa (~20 líneas de definición de tasks) |
+| Retry | `withRetry()` manual por workflow | Integrado en DagExecutor con errores tipados |
+| Checkpoint | `.checkpoint_STAGE` (archivo vacío) | `.dag_TASK.json` (metadatos: timestamp, duración) |
+| Errores | `catch { case e: Throwable }` (captura OOM) | `NonFatal` guards + `TaskError` (Transient/Fatal/Skippable) |
+| Tasks no-críticas | `critical = false` en `withRetry` | `critical = false` en DagTask — no bloquea dependientes |
+| Listas de tablas | Hardcoded en Pipeline (`BRONZE_TABLES`, etc.) | `TableRegistry.bronzeNames/silverNames/goldNames` |
+| Thread pool | `newFixedThreadPool(2)` manual | `DagExecutor(parallelism = 3)` automático |
 
 ---
 
@@ -303,6 +317,67 @@ flowchart LR
 | `spark.driver.memory` | 512m | Optimizado para contenedor |
 | `spark.sql.extensions` | DeltaSparkSessionExtension | Habilita Delta Lake |
 | `spark.sql.catalog.spark_catalog` | DeltaCatalog | Catálogo Delta |
+
+#### TableRegistry
+
+> [`src/main/scala/medallion/config/TableRegistry.scala`](src/main/scala/medallion/config/TableRegistry.scala)
+
+Fuente única de verdad para todas las definiciones de tablas del pipeline. Centraliza nombres, formatos, dependencias, claves de deduplicación y esquemas CSV. Elimina la duplicación de listas de tablas que existía en Pipeline, EtlWorkflow, HiveWorkflow, LineageWorkflow, SilverLayer y GoldLayer.
+
+```mermaid
+classDiagram
+    class TableRegistry {
+        +Seq~TableDef~ bronze
+        +Seq~TableDef~ silver
+        +Seq~TableDef~ gold
+        +Seq~TableDef~ all
+        +Seq~String~ bronzeNames
+        +Seq~String~ silverNames
+        +Seq~String~ goldNames
+        +Int totalTables
+        +Map sourcesMap(Layer)
+        +String formatString(Layer|Format)
+    }
+
+    class TableDef {
+        +String name
+        +Layer layer
+        +Format format
+        +Seq~String~ sources
+        +Seq~String~ deduplicateKeys
+        +Option~String~ csvFileName
+        +Option~StructType~ csvSchema
+    }
+
+    class Layer {
+        <<sealed trait>>
+    }
+    Layer <|-- Raw
+    Layer <|-- Bronze
+    Layer <|-- Silver
+    Layer <|-- Gold
+
+    class Format {
+        <<sealed trait>>
+    }
+    Format <|-- Csv
+    Format <|-- Parquet
+    Format <|-- Delta
+
+    TableRegistry --> TableDef : contains
+    TableDef --> Layer
+    TableDef --> Format
+```
+
+**Consumidores:**
+
+| Archivo | Antes (v3) | Después (v4) |
+|---------|------------|--------------|
+| `Pipeline.scala` | `BRONZE_TABLES`, `SILVER_TABLES`, `GOLD_TABLES` hardcoded | `TableRegistry.bronzeNames/silverNames/goldNames` |
+| `BronzeLayer.scala` | 7× `processTable()` hardcoded | `TableRegistry.bronze.foreach { td => ... }` |
+| `EtlWorkflow.scala` | `goldTables`, `silverTables` hardcoded | `TableRegistry.goldNames`, `TableRegistry.silverNames` |
+| `LineageWorkflow.scala` | `BRONZE_SOURCES`, `SILVER_SOURCES`, `GOLD_SOURCES` | `TableRegistry.sourcesMap(layer)` |
+| `HiveWorkflow.scala` | `goldTables`, `silverTables` hardcoded | `TableRegistry.goldNames`, `TableRegistry.silverNames` |
 
 ---
 
@@ -438,6 +513,78 @@ flowchart TB
 | `hiveWarehouse` | `/hive/warehouse` | Directorio warehouse Hive |
 | `hiveMetastoreUris` | `thrift://localhost:9083` | URI del Hive Metastore |
 
+#### CircuitBreaker
+
+> [`src/main/scala/medallion/infra/CircuitBreaker.scala`](src/main/scala/medallion/infra/CircuitBreaker.scala)
+
+Protección contra fallos sistémicos en operaciones HDFS/IO. Implementa un state machine con tres estados para evitar cascadas de fallos.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Open : failures >= threshold
+    Open --> HalfOpen : resetTimeMs elapsed
+    HalfOpen --> Closed : operación exitosa
+    HalfOpen --> Open : operación falló
+```
+
+| Parámetro | Default | Descripción |
+|-----------|---------|-------------|
+| `name` | `"default"` | Identificador del circuito para logging |
+| `threshold` | 3 | Fallos consecutivos para abrir |
+| `resetTimeMs` | 60000 | Tiempo (ms) antes de probar half-open |
+
+**API:**
+
+```scala
+val cb = new CircuitBreaker("hdfs-io", threshold = 3, resetTimeMs = 60000)
+val result = cb.execute {
+  // Operación IO protegida — lanza CircuitBreakerOpenException si abierto
+  DataLakeIO.writeParquet(df, path, table)
+}
+```
+
+#### ViewScope
+
+> [`src/main/scala/medallion/infra/ViewScope.scala`](src/main/scala/medallion/infra/ViewScope.scala)
+
+Loan pattern para gestión automática del ciclo de vida de vistas temporales Spark. Garantiza que las vistas se registren al inicio y se liberen al salir, eliminando la necesidad de `System.gc()` manual.
+
+```mermaid
+flowchart LR
+    REGISTER["Registrar vistas<br/>spark.read.format<br/>.createOrReplaceTempView"] --> BODY["Ejecutar bloque<br/>spark.sql(...)"]
+    BODY --> CLEANUP["finally {<br/>dropTempView ×N<br/>clearCache<br/>}"]
+
+    style REGISTER fill:#e8f5e9
+    style BODY fill:#e3f2fd
+    style CLEANUP fill:#ffebee
+```
+
+**Variantes de conveniencia:**
+
+| Método | Prefijo Vista | Formato | Uso |
+|--------|--------------|---------|-----|
+| `withBronzeViews` | _(ninguno)_ | parquet | SilverLayer |
+| `withSilverViews` | `silver_` | parquet | GoldLayer |
+| `withGoldViews` | `gold_` | delta | Analytics |
+
+**Antes (v3) vs Después (v4):**
+
+```scala
+// v3 — Manual, 8× System.gc()
+registerSilverTables(spark, silverPath, Seq("catalogo", "rentabilidad"))
+buildDimProducto(spark, goldPath)
+freeMemory(spark)  // clearCache + System.gc()
+// ...repetir 7 veces más
+
+// v4 — Loan pattern, cleanup automático
+ViewScope.withSilverViews(spark, silverPath, TableRegistry.silverNames) {
+  buildDimProducto(spark, goldPath)
+  buildDimCliente(spark, goldPath)
+  // ... todas las tablas Gold
+}  // Vistas liberadas automáticamente
+```
+
 ---
 
 ### engine/ — Motor DAG
@@ -446,16 +593,31 @@ flowchart TB
 
 > [`src/main/scala/medallion/engine/DagTask.scala`](src/main/scala/medallion/engine/DagTask.scala)
 
-Nodo del grafo dirigido acíclico (DAG) de ejecución.
+Nodo del grafo dirigido acíclico (DAG) de ejecución. Soporta errores tipados (`TaskError`), flag `critical` para tasks no-bloqueantes, y constructor de compatibilidad `fromUnit`.
 
 ```mermaid
 classDiagram
     class DagTask {
         +String id
         +Set~String~ dependencies
-        +Function0~Unit~ execute
+        +Function0~Either~ execute
         +Int retryCount = 3
+        +Boolean critical = true
+        +String description = ""
     }
+
+    class DagTask$ {
+        +fromUnit(id, deps, body, ...) DagTask
+    }
+
+    class TaskError {
+        <<sealed trait>>
+        +String message
+        +Option~Throwable~ cause
+    }
+    TaskError <|-- Transient : "reintentar"
+    TaskError <|-- Fatal : "no reintentar"
+    TaskError <|-- Skippable : "completar con warning"
 
     class TaskStatus {
         <<sealed trait>>
@@ -467,55 +629,75 @@ classDiagram
         +Throwable error
     }
     class Skipped
+    class CompletedWithWarning {
+        +String warning
+    }
 
     TaskStatus <|-- Pending
     TaskStatus <|-- Running
     TaskStatus <|-- Completed
     TaskStatus <|-- Failed
     TaskStatus <|-- Skipped
+    TaskStatus <|-- CompletedWithWarning
 
     DagTask --> TaskStatus : produces
+    DagTask --> TaskError : returns Left
+    DagTask$ --> DagTask : creates
 ```
+
+**Canal de error tipado:**
+
+| Tipo | Retry | Propaga | Uso |
+|------|-------|---------|-----|
+| `Transient` | ✔ Sí | Según `critical` | IO timeout, HDFS temporalmente caído |
+| `Fatal` | ✗ No | Según `critical` | Schema mismatch, datos corruptos |
+| `Skippable` | ✗ No | ✗ No | Warning no-bloqueante, task se marca `CompletedWithWarning` |
 
 #### DagExecutor
 
 > [`src/main/scala/medallion/engine/DagExecutor.scala`](src/main/scala/medallion/engine/DagExecutor.scala)
 
-Motor de ejecución paralela que resuelve dependencias del DAG, ejecuta tasks concurrentes con un thread pool controlado, y soporta retry con backoff.
+Motor de ejecución paralela que resuelve dependencias del DAG, ejecuta tasks concurrentes con un thread pool controlado, y soporta retry con backoff. Usa `NonFatal` para no capturar errores fatales del JVM (OOM, StackOverflow).
 
 ```mermaid
 flowchart TB
-    START["new DagExecutor(tasks, parallelism=2)"]
+    START["new DagExecutor(tasks, parallelism=3)"]
     START --> EXEC[".execute()"]
 
     EXEC --> VALIDATE["validateNoCycles()<br/>DFS visitado + inStack"]
-    VALIDATE --> INIT_STATUS["Inicializar statusMap<br/>Skipped si checkpointed<br/>Pending si nuevo"]
+    VALIDATE --> INIT_STATUS["Inicializar statusMap<br/>Skipped si checkpointed (.json)<br/>Pending si nuevo"]
 
     INIT_STATUS --> POOL["FixedThreadPool(parallelism)"]
     POOL --> SCHEDULE
 
     subgraph Loop["scheduleReady() — Loop recursivo"]
-        SCHEDULE["Buscar tasks con:<br/>status == Pending AND<br/>deps ∈ {Completed, Skipped}"]
+        SCHEDULE["Buscar tasks con:<br/>status == Pending AND<br/>deps ∈ {Completed, Skipped,<br/>CompletedWithWarning,<br/>Failed si dep no es critical}"]
         SCHEDULE --> LAUNCH["Future { executeWithRetry(task) }"]
-        LAUNCH --> UPDATE["statusMap.put(id, result)<br/>writeCheckpoint si Completed"]
+        LAUNCH --> RESULT{"execute() → Either"}
+        RESULT -->|"Right(())"| OK["Completed"]
+        RESULT -->|"Left(Transient)"| RETRY["Retry con backoff"]
+        RESULT -->|"Left(Fatal)"| FAIL["Failed (no retry)"]
+        RESULT -->|"Left(Skippable)"| WARN["CompletedWithWarning"]
+        OK & FAIL & WARN --> UPDATE["statusMap.put(id, result)<br/>writeCheckpoint(.json) si OK"]
         UPDATE --> RESCHEDULE["scheduleReady()<br/>Desbloquear dependientes"]
         RESCHEDULE --> SCHEDULE
     end
 
     Loop --> LATCH["CountDownLatch.await<br/>timeout 30 min"]
-    LATCH --> REPORT["printDagReport()"]
+    LATCH --> REPORT["printDagReport()<br/>con duraciones por task"]
 
     style Loop fill:#e3f2fd
 ```
 
-**Algoritmo:**
+**Mejoras v4:**
 
-1. Valida que no haya ciclos (DFS con detección de back-edge)
-2. Inicializa estado: `Skipped` si checkpointed, `Pending` si no
-3. `scheduleReady()`: busca tasks cuyas dependencias son `Completed`/`Skipped`
-4. Lanza cada task en un `Future` con `executeWithRetry`
-5. Al completar una task, re-invoca `scheduleReady()` para desbloquear dependientes
-6. `CountDownLatch` espera a que todas completen (timeout 30 min)
+| Aspecto | v3 | v4 |
+|---------|----|----|
+| Error handling | `catch { case e: Throwable }` | `NonFatal` + `TaskError` tipado |
+| Checkpoint | `.dag_TASK` (archivo vacío) | `.dag_TASK.json` con metadatos |
+| Tasks no-críticas | No soportado | `critical=false` → fallo no bloquea dependientes |
+| Status | 5 estados | 6 estados (+`CompletedWithWarning`) |
+| Duraciones | No registradas | `ConcurrentHashMap[taskId, Long]` → reporte |
 
 ---
 
@@ -525,19 +707,34 @@ flowchart TB
 
 > [`src/main/scala/medallion/layer/BronzeLayer.scala`](src/main/scala/medallion/layer/BronzeLayer.scala)
 
-Ingesta y limpieza: lee CSVs con schema enforcement, deduplica por claves naturales, filtra nulos y agrega columnas de auditoría.
+Ingesta y limpieza: itera declarativamente desde `TableRegistry`, lee CSVs con schema enforcement, deduplica por claves naturales, y escribe filas rechazadas en un Dead Letter Queue (`_rejected/`).
 
 ```mermaid
 flowchart LR
-    RAW["RAW<br/>7 CSV files"] --> READ["DataLakeIO.readCsv<br/>+ CsvSchemas"]
-    READ --> FILTER["filter<br/>keyColumns.isNotNull"]
-    FILTER --> DEDUP["dropDuplicates<br/>por claves naturales"]
+    REG["TableRegistry.bronze<br/>.foreach { td => ... }"]
+    REG --> RAW["RAW<br/>7 CSV files"]
+    RAW --> READ["DataLakeIO.readCsv<br/>+ td.csvSchema"]
+    READ --> SPLIT{{"keyColumns.isNotNull?"}}
+    SPLIT -->|Sí| VALID["Filas válidas"]
+    SPLIT -->|No| DLQ["Dead Letter Queue<br/>_rejected/tableName<br/>+ _rejected_at<br/>+ _rejected_reason"]
+    VALID --> DEDUP["dropDuplicates<br/>por td.deduplicateKeys"]
     DEDUP --> AUDIT["withColumn<br/>_bronze_ingested_at<br/>_bronze_source_file"]
     AUDIT --> WRITE["DataLakeIO.writeParquet<br/>→ Bronze"]
 
     style RAW fill:#ff9800,color:#000
     style WRITE fill:#cd7f32,color:#fff
+    style DLQ fill:#ffcdd2
 ```
+
+**Dead Letter Queue (DLQ):**
+
+Las filas con claves naturales nulas ya no se descartan silenciosamente. Se escriben en `bronzePath/_rejected/<tableName>/` con columnas de auditoría:
+
+| Columna DLQ | Contenido |
+|-------------|-----------|
+| `_rejected_at` | Timestamp de rechazo |
+| `_rejected_reason` | `"null key: Cod_Producto,..."` |
+| `_source_file` | Nombre del CSV original |
 
 | Tabla Bronze | CSV Fuente | Claves de Deduplicación |
 |-------------|------------|------------------------|
@@ -553,31 +750,35 @@ flowchart LR
 
 > [`src/main/scala/medallion/layer/SilverLayer.scala`](src/main/scala/medallion/layer/SilverLayer.scala)
 
-Lógica de negocio: registra vistas temporales de Bronze y construye 8 tablas analíticas con Spark SQL.
+Lógica de negocio: usa `ViewScope.withBronzeViews` loan pattern para registrar automáticamente las 7 vistas Bronze y liberarlas al finalizar. Construye 8 tablas analíticas con Spark SQL.
 
 ```mermaid
 flowchart TB
-    REG["registerBronzeTables<br/>7 vistas temporales"]
+    VS["ViewScope.withBronzeViews<br/>(spark, bronzePath, TableRegistry.bronzeNames)"]
 
-    subgraph Retail["Dominio Retail — 5 tablas"]
-        CP["buildCatalogoProductos<br/>JOIN producto + subcategoria + categoria"]
-        VE["buildVentasEnriquecidas<br/>Ingreso, Costo, Margen, Ganancia Neta,<br/>Dias_Envio, Tipo_Envio, Tiene_Promocion"]
-        RVM["buildResumenVentasMensuales<br/>GROUP BY año, mes, categoría<br/>Ordenes, Clientes, Unidades, Ticket"]
-        RP["buildRentabilidadProducto<br/>Revenue, Costo, Margen por SKU"]
-        SC["buildSegmentacionClientes<br/>CTE cliente_metricas<br/>→ Segmento RFM: VIP/Premium/Regular/Ocasional"]
+    subgraph Block["Bloque protegido — vistas auto-liberadas"]
+        subgraph Retail["Dominio Retail — 5 tablas"]
+            CP["buildCatalogoProductos<br/>JOIN producto + subcategoria + categoria"]
+            VE["buildVentasEnriquecidas<br/>Ingreso, Costo, Margen, Ganancia Neta,<br/>Dias_Envio, Tipo_Envio, Tiene_Promocion"]
+            RVM["buildResumenVentasMensuales<br/>GROUP BY año, mes, categoría<br/>Ordenes, Clientes, Unidades, Ticket"]
+            RP["buildRentabilidadProducto<br/>Revenue, Costo, Margen por SKU"]
+            SC["buildSegmentacionClientes<br/>CTE cliente_metricas<br/>→ Segmento RFM: VIP/Premium/Regular/Ocasional"]
+        end
+
+        subgraph Mining["Dominio Mining — 3 tablas"]
+            PO["buildProduccionOperador<br/>GROUP BY operador<br/>Mineral, Desperdicio, % Desperdicio"]
+            EM["buildEficienciaMinera<br/>GROUP BY truck, proyecto<br/>Producción Neta, StdDev, Eficiencia"]
+            PP["buildProduccionPorPais<br/>GROUP BY country<br/>Operadores, Trucks, Mineral, EdadPromedio"]
+        end
     end
 
-    subgraph Mining["Dominio Mining — 3 tablas"]
-        PO["buildProduccionOperador<br/>GROUP BY operador<br/>Mineral, Desperdicio, % Desperdicio"]
-        EM["buildEficienciaMinera<br/>GROUP BY truck, proyecto<br/>Producción Neta, StdDev, Eficiencia"]
-        PP["buildProduccionPorPais<br/>GROUP BY country<br/>Operadores, Trucks, Mineral, EdadPromedio"]
-    end
+    VS --> Block
+    Block --> CLEANUP["finally: dropTempView ×7<br/>clearCache"]
 
-    REG --> Retail & Mining
-    Retail & Mining --> DROP["dropBronzeViews<br/>clearCache + GC"]
-
+    style Block fill:#f5f5f5
     style Retail fill:#e3f2fd
     style Mining fill:#fff3e0
+    style CLEANUP fill:#ffebee
 ```
 
 **Detalle de tablas Silver:**
@@ -597,46 +798,41 @@ flowchart TB
 
 > [`src/main/scala/medallion/layer/GoldLayer.scala`](src/main/scala/medallion/layer/GoldLayer.scala)
 
-Modelos dimensionales Star Schema escritos en Delta Lake. Implementa carga incremental: registra solo las vistas Silver necesarias para cada tabla Gold, luego las libera.
+Modelos dimensionales Star Schema escritos en Delta Lake. Usa `ViewScope.withSilverViews` loan pattern para registrar todas las vistas Silver de una vez y liberarlas automáticamente al salir.
 
 ```mermaid
 flowchart TB
-    subgraph Strategy["Estrategia de Carga Incremental"]
-        direction LR
-        LOAD1["registerSilverTables<br/>catalogo + rentabilidad"]
-        BUILD1["buildDimProducto"]
-        FREE1["freeMemory<br/>clearCache + GC"]
-        LOAD1 --> BUILD1 --> FREE1
+    VS["ViewScope.withSilverViews<br/>(spark, silverPath, TableRegistry.silverNames)"]
+
+    subgraph Block["Bloque protegido — vistas auto-liberadas"]
+        subgraph RetailGold["Retail — 4 tablas Delta"]
+            DIM_P["dim_producto<br/>319 productos<br/>clasificacion_rentabilidad<br/>clasificacion_rotacion"]
+            DIM_C["dim_cliente<br/>Segmento RFM<br/>LTV Anualizado<br/>score_frecuencia/monetario"]
+            FACT_V["fact_ventas<br/>Hechos transaccionales<br/>periodo, segmento_cliente"]
+            KPI_V["kpi_ventas_mensuales<br/>MoM%, YTD, pct_margen<br/>Window Functions LAG/SUM"]
+        end
+
+        subgraph MiningGold["Mining — 3 tablas Delta"]
+            DIM_O["dim_operador<br/>clasificacion_eficiencia<br/>DENSE_RANK ranking"]
+            FACT_M["fact_produccion_minera<br/>coef_variacion<br/>pct_contribucion_global"]
+            KPI_M["kpi_mineria<br/>mineral_por_operador/truck<br/>tasa_desperdicio<br/>evaluacion_operativa"]
+        end
     end
 
-    subgraph RetailGold["Retail — 4 tablas Delta"]
-        DIM_P["dim_producto<br/>319 productos<br/>clasificacion_rentabilidad<br/>clasificacion_rotacion"]
-        DIM_C["dim_cliente<br/>Segmento RFM<br/>LTV Anualizado<br/>score_frecuencia/monetario"]
-        FACT_V["fact_ventas<br/>Hechos transaccionales<br/>periodo, segmento_cliente"]
-        KPI_V["kpi_ventas_mensuales<br/>MoM%, YTD, pct_margen<br/>Window Functions LAG/SUM"]
-    end
+    VS --> Block
+    Block --> CLEANUP["finally: dropTempView ×8<br/>clearCache"]
 
-    subgraph MiningGold["Mining — 3 tablas Delta"]
-        DIM_O["dim_operador<br/>clasificacion_eficiencia<br/>DENSE_RANK ranking"]
-        FACT_M["fact_produccion_minera<br/>coef_variacion<br/>pct_contribucion_global"]
-        KPI_M["kpi_mineria<br/>mineral_por_operador/truck<br/>tasa_desperdicio<br/>evaluacion_operativa"]
-    end
-
-    Strategy --> RetailGold & MiningGold
-
+    style Block fill:#f5f5f5
     style RetailGold fill:#fff8e1
     style MiningGold fill:#fff3e0
-    style Strategy fill:#f5f5f5
+    style CLEANUP fill:#ffebee
 ```
 
-**Patrón de escritura Gold:**
+**v3 vs v4:**
 
 ```
-registerSilverTables(solo las necesarias)
-  → buildDimXxx / buildFactXxx / buildKpiXxx (Spark SQL)
-    → DataLakeIO.writeDelta(df.coalesce(1))
-      → freeMemory (clearCache + System.gc)
-        → dropSilverViews (cuando se terminan todas)
+v3: registerSilverTables(2) → build → freeMemory → register(1) → build → freeMemory → ...  (8×)
+v4: ViewScope.withSilverViews(all) { build; build; build; ... }  (1× auto-cleanup)
 ```
 
 ---
@@ -740,7 +936,7 @@ flowchart LR
 
 > [`src/main/scala/medallion/workflow/LineageWorkflow.scala`](src/main/scala/medallion/workflow/LineageWorkflow.scala)
 
-Captura y genera un grafo de linaje completo del pipeline. Conoce el mapeo de dependencias entre tablas (hardcoded):
+Captura y genera un grafo de linaje completo del pipeline. Las dependencias entre tablas se obtienen de `TableRegistry.sourcesMap(layer)` (fuente única de verdad):
 
 ```mermaid
 flowchart TB
@@ -1033,3 +1229,38 @@ erDiagram
         string evaluacion_operativa
     }
 ```
+
+---
+
+## Changelog v4.0
+
+### Nuevos componentes
+
+| Archivo | Descripción |
+|---------|-------------|
+| `config/TableRegistry.scala` | Fuente única de verdad para 22 tablas (7 Bronze + 8 Silver + 7 Gold) con nombres, formatos, dependencias, claves de deduplicación y esquemas CSV |
+| `infra/CircuitBreaker.scala` | State machine Closed→Open→HalfOpen para protección contra fallos sistémicos IO con threshold configurable y reset temporal |
+| `infra/ViewScope.scala` | Loan pattern para gestión automática del ciclo de vida de vistas temporales Spark con cleanup garantizado en `finally` |
+
+### Archivos refactorizados
+
+| Archivo | Cambios principales |
+|---------|-------------------|
+| `Pipeline.scala` | v3→v4: reescritura de ~190 líneas imperativas a DAG declarativo (~20 líneas), eliminado `Future.sequence`/`withRetry`/`writeCheckpoint` manuales |
+| `engine/DagTask.scala` | Canal de error tipado `Either[TaskError, Unit]`, flag `critical`, `DagTask.fromUnit` para compatibilidad, `CompletedWithWarning` status |
+| `engine/DagExecutor.scala` | `NonFatal` guards, checkpoint JSON con metadatos (timestamp, duración), soporte `critical=false` y `CompletedWithWarning` |
+| `layer/BronzeLayer.scala` | Iteración declarativa desde TableRegistry, Dead Letter Queue (`_rejected/`) para filas con claves nulas |
+| `layer/SilverLayer.scala` | `ViewScope.withBronzeViews` loan pattern, eliminado `registerBronzeTables`/`dropBronzeViews`/`System.gc()` |
+| `layer/GoldLayer.scala` | `ViewScope.withSilverViews` loan pattern, eliminado 8× `freeMemory()`/`System.gc()` y gestión manual de vistas |
+| `workflow/EtlWorkflow.scala` | `TableRegistry` para todas las listas de tablas, `NonFatal` en todos los catch blocks |
+| `workflow/LineageWorkflow.scala` | `TableRegistry.sourcesMap(layer)` reemplaza 3 mapas hardcoded de dependencias |
+| `workflow/HiveWorkflow.scala` | `TableRegistry.goldNames`/`silverNames` reemplaza listas hardcoded |
+
+### Mejoras por eje
+
+| Eje | Mejoras |
+|-----|---------|
+| **Declarativo** | Pipeline como DAG de tasks con dependencias; BronzeLayer itera desde TableRegistry; listas de tablas centralizadas |
+| **Robusto** | `NonFatal` en lugar de `catch Throwable`; errores tipados (Transient/Fatal/Skippable); checkpoint JSON con metadatos |
+| **Elástico** | DagExecutor con parallelism configurable; tasks no-críticas (`critical=false`) no bloquean dependientes |
+| **Resiliente** | CircuitBreaker para IO; Dead Letter Queue en Bronze; ViewScope garantiza cleanup de vistas |
