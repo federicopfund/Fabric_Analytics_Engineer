@@ -1,0 +1,81 @@
+-- ════════════════════════════════════════════════════════════════════════════
+-- MEDIDAS BASE — VENTAS
+-- Tabla destino: fact_ventas (crear como Nueva medida en fact_ventas)
+-- ════════════════════════════════════════════════════════════════════════════
+
+DEFINE
+
+    -- Ingreso Bruto Total
+    MEASURE fact_ventas[Ingreso Bruto] =
+        SUM( fact_ventas[ingreso_bruto] )
+
+    -- Costo Total
+    MEASURE fact_ventas[Costo Total] =
+        SUM( fact_ventas[costo_total] )
+
+    -- Margen Bruto
+    MEASURE fact_ventas[Margen Bruto] =
+        SUM( fact_ventas[margen_bruto] )
+
+    -- Ganancia Neta (después de impuesto y flete)
+    MEASURE fact_ventas[Ganancia Neta] =
+        SUM( fact_ventas[ganancia_neta] )
+
+    -- Total Impuestos
+    MEASURE fact_ventas[Total Impuestos] =
+        SUM( fact_ventas[impuesto] )
+
+    -- Total Flete
+    MEASURE fact_ventas[Total Flete] =
+        SUM( fact_ventas[flete] )
+
+    -- Unidades Vendidas
+    MEASURE fact_ventas[Unidades Vendidas] =
+        SUM( fact_ventas[cantidad] )
+
+    -- Total Órdenes (distintas)
+    MEASURE fact_ventas[Total Ordenes] =
+        DISTINCTCOUNT( fact_ventas[orden_id] )
+
+    -- Clientes Únicos
+    MEASURE fact_ventas[Clientes Unicos] =
+        DISTINCTCOUNT( fact_ventas[cliente_key] )
+
+    -- Productos Vendidos (distintos)
+    MEASURE fact_ventas[Productos Vendidos] =
+        DISTINCTCOUNT( fact_ventas[producto_key] )
+
+    -- Porcentaje de Margen
+    MEASURE fact_ventas[Pct Margen] =
+        DIVIDE( [Margen Bruto], [Ingreso Bruto], 0 )
+
+    -- Porcentaje Ganancia Neta
+    MEASURE fact_ventas[Pct Ganancia Neta] =
+        DIVIDE( [Ganancia Neta], [Ingreso Bruto], 0 )
+
+    -- Ticket Promedio (ingreso por orden)
+    MEASURE fact_ventas[Ticket Promedio] =
+        DIVIDE( [Ingreso Bruto], [Total Ordenes], 0 )
+
+    -- Precio Promedio por Unidad
+    MEASURE fact_ventas[Precio Promedio Unidad] =
+        DIVIDE( [Ingreso Bruto], [Unidades Vendidas], 0 )
+
+    -- Costo Promedio por Unidad
+    MEASURE fact_ventas[Costo Promedio Unidad] =
+        DIVIDE( [Costo Total], [Unidades Vendidas], 0 )
+
+    -- Unidades por Orden
+    MEASURE fact_ventas[Unidades por Orden] =
+        DIVIDE( [Unidades Vendidas], [Total Ordenes], 0 )
+
+    -- Ingreso por Cliente
+    MEASURE fact_ventas[Ingreso por Cliente] =
+        DIVIDE( [Ingreso Bruto], [Clientes Unicos], 0 )
+
+    -- Días de Envío Promedio
+    MEASURE fact_ventas[Dias Envio Promedio] =
+        AVERAGE( fact_ventas[dias_envio] )
+
+EVALUATE
+ROW( "Validacion", "Medidas Base Ventas OK" )
