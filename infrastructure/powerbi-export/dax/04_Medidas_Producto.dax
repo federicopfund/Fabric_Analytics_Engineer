@@ -1,0 +1,63 @@
+-- ════════════════════════════════════════════════════════════════════════════
+-- MEDIDAS DE PRODUCTO
+-- Análisis de categorías, subcategorías, rentabilidad y rotación
+-- ════════════════════════════════════════════════════════════════════════════
+
+DEFINE
+
+    MEASURE fact_ventas[Ingreso Bruto] =
+        SUM( fact_ventas[ingreso_bruto] )
+
+    -- Participación de Categoría (% Ingreso)
+    MEASURE fact_ventas[Pct Participacion Categoria] =
+        DIVIDE(
+            [Ingreso Bruto],
+            CALCULATE( [Ingreso Bruto], ALL( fact_ventas[categoria] ) ),
+            0
+        )
+
+    -- Participación de Subcategoría
+    MEASURE fact_ventas[Pct Participacion Subcategoria] =
+        DIVIDE(
+            [Ingreso Bruto],
+            CALCULATE( [Ingreso Bruto], ALL( fact_ventas[subcategoria] ) ),
+            0
+        )
+
+    -- Ranking Producto por Ingreso
+    MEASURE fact_ventas[Ranking Producto Ingreso] =
+        RANKX(
+            ALL( dim_producto[producto_nombre] ),
+            [Ingreso Bruto],
+            ,
+            DESC,
+            Dense
+        )
+
+    -- % Productos Estrella
+    MEASURE dim_producto[Pct Productos Estrella] =
+        DIVIDE(
+            CALCULATE(
+                COUNTROWS( dim_producto ),
+                dim_producto[clasificacion_rentabilidad] = "Estrella"
+            ),
+            COUNTROWS( dim_producto ),
+            0
+        )
+
+    -- Productos Sin Ventas
+    MEASURE dim_producto[Productos Sin Ventas] =
+        CALCULATE(
+            COUNTROWS( dim_producto ),
+            dim_producto[clasificacion_rentabilidad] = "Sin Ventas"
+        )
+
+    -- Alta Rotación (cantidad)
+    MEASURE dim_producto[Productos Alta Rotacion] =
+        CALCULATE(
+            COUNTROWS( dim_producto ),
+            dim_producto[clasificacion_rotacion] = "Alta Rotacion"
+        )
+
+EVALUATE
+ROW( "Validacion", "Medidas Producto OK" )
