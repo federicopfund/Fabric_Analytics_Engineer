@@ -108,87 +108,114 @@ graph TB
 
 ---
 
-## Pipeline de Procesamiento — Workflow Paralelizable
+## Pipeline de Procesamiento — Workflow Paralelizable v3.0
 
-El pipeline se diseña con etapas independientes por dominio que pueden ejecutarse en paralelo, sincronizándose solo cuando hay dependencias entre capas.
+El pipeline v3.0 implementa **ejecución paralela de workflows**, **retry con backoff exponencial** y **checkpoint para reanudación**. Los workflows post-ETL (Quality, Lineage, Analytics) se ejecutan concurrentemente usando un thread pool controlado.
 
 ```mermaid
 flowchart TB
-    START([spark-submit<br/>MainETL]) --> DETECT{HDFS<br/>disponible?}
+    START([spark-submit<br/>datalake.Pipeline]) --> DETECT{HDFS<br/>disponible?}
 
-    DETECT -->|Sí| HDFS_INIT["Modo HDFS<br/>createDatalakeStructure()<br/>uploadToRaw()"]
-    DETECT -->|No| LOCAL_INIT["Modo LOCAL<br/>initLocalDatalake()<br/>copiar CSVs a raw/"]
+    DETECT -->|Sí| HDFS["Modo HDFS + Hive<br/>setupHadoopEnvironment<br/>ingestRawData"]
+    DETECT -->|No| LOCAL["Modo LOCAL<br/>initLocalDatalake<br/>copiar CSVs a raw/"]
 
-    HDFS_INIT --> SPARK_INIT["SparkSession<br/>+ Delta Lake Extensions<br/>+ Kryo Serializer"]
-    LOCAL_INIT --> SPARK_INIT
+    HDFS --> INIT["SparkSession local·2<br/>+ Delta Lake + Kryo<br/>Executors.newFixedThreadPool·2"]
+    LOCAL --> INIT
 
-    SPARK_INIT --> BRONZE_START["STAGE 1: BRONZE"]
+    INIT --> CHK_ETL{checkpoint<br/>ETL?}
+    CHK_ETL -->|"existe → skip"| FORK
+    CHK_ETL -->|no| WF1_R
 
-    subgraph BRONZE_PARALLEL["Bronze — Paralelo por Dominio"]
-        direction LR
-        subgraph RETAIL_BRONZE["Retail Domain"]
-            B_CAT[categoria<br/>4 rows]
-            B_SUB[subcategoria<br/>37 rows]
-            B_PRO[producto<br/>319 rows]
-            B_VEN[ventasinternet<br/>47,263 rows]
-            B_SUC[sucursales<br/>11 rows]
+    subgraph FASE1["FASE 1 — Secuencial"]
+        direction TB
+        WF1_R["withRetry·3x · backoff 2s·4s·6s<br/>critical = true"] --> WF1_B
+        subgraph WF1["WF1: ETL Pipeline — EtlWorkflow.run"]
+            direction LR
+            WF1_B["BRONZE<br/>7 tablas<br/>Parquet"] --> WF1_S["SILVER<br/>8 tablas<br/>Parquet"] --> WF1_G["GOLD<br/>7 tablas<br/>Delta Lake"]
         end
-        subgraph MINING_BRONZE["Mining Domain"]
-            B_FAC[factmine<br/>49 rows]
-            B_MIN[mine<br/>15,205 rows]
-        end
+        WF1 --> CPETL["✔ .checkpoint_ETL"]
     end
 
-    BRONZE_START --> BRONZE_PARALLEL
-    BRONZE_PARALLEL --> SILVER_START["STAGE 2: SILVER"]
+    CPETL --> FORK
 
-    subgraph SILVER_PARALLEL["Silver — Paralelo por Dominio"]
-        direction LR
-        subgraph RETAIL_SILVER["Retail Business Logic"]
-            S_CAT[catalogo_productos]
-            S_VEN[ventas_enriquecidas]
-            S_RES[resumen_ventas_mensuales]
-            S_REN[rentabilidad_producto]
-            S_SEG[segmentacion_clientes]
+    FORK{{"FORK — Future.sequence<br/>3 scala.concurrent.Future<br/>ExecutionContext · pool = 2 threads"}}
+
+    FORK -->|"Future·1"| CHK_Q{checkpoint<br/>QUALITY?}
+    FORK -->|"Future·2"| CHK_L{checkpoint<br/>LINEAGE?}
+    FORK -->|"Future·3"| CHK_A{checkpoint<br/>ANALYTICS?}
+
+    subgraph FASE2["FASE 2 — Paralelo · scala.concurrent.Future"]
+
+        subgraph F1["Future 1 — Thread pool"]
+            CHK_Q -->|"skip"| DONE_Q((" "))
+            CHK_Q -->|no| RQ["withRetry·3x<br/>critical = false"]
+            RQ --> WF4["WF4: DATA QUALITY<br/>DataQualityWorkflow<br/>Bronze + Silver + Gold<br/>Schema · Null · Dedup<br/>Score 0-100 · Grade A+"]
+            WF4 --> CPQ["✔ .checkpoint_QUALITY"]
+            CPQ --> DONE_Q
         end
-        subgraph MINING_SILVER["Mining Business Logic"]
-            S_PRO[produccion_operador]
-            S_EFI[eficiencia_minera]
-            S_PAI[produccion_por_pais]
+
+        subgraph F2["Future 2 — Thread pool"]
+            CHK_L -->|"skip"| DONE_L((" "))
+            CHK_L -->|no| RL["withRetry·3x<br/>critical = false"]
+            RL --> WF5["WF5: LINEAGE<br/>LineageWorkflow<br/>22 tablas source→target<br/>JSON Manifest export"]
+            WF5 --> CPL["✔ .checkpoint_LINEAGE"]
+            CPL --> DONE_L
         end
+
+        subgraph F3["Future 3 — Thread pool"]
+            CHK_A -->|"skip"| DONE_A((" "))
+            CHK_A -->|no| RA["withRetry·3x<br/>critical = false"]
+            RA --> WF2["WF2: BI ANALYTICS<br/>AnalyticsWorkflow<br/>10 gráficos PNG<br/>JFreeChart headless"]
+            WF2 --> CPA["✔ .checkpoint_ANALYTICS"]
+            CPA --> DONE_A
+        end
+
     end
 
-    SILVER_START --> SILVER_PARALLEL
-    SILVER_PARALLEL --> GOLD_START["STAGE 3: GOLD"]
+    DONE_Q --> BARRIER
+    DONE_L --> BARRIER
+    DONE_A --> BARRIER
 
-    subgraph GOLD_PARALLEL["Gold — Delta Lake — Paralelo por Tipo"]
-        direction LR
-        subgraph DIMENSIONS["Dimensiones"]
-            G_DIM_P["dim_producto<br/>319 rows"]
-            G_DIM_C["dim_cliente<br/>17,555 rows"]
-            G_DIM_O["dim_operador<br/>9,132 rows"]
-        end
-        subgraph FACTS["Tablas de Hechos"]
-            G_FACT_V["fact_ventas<br/>47,263 rows<br/>partitioned by anio"]
-            G_FACT_M["fact_produccion_minera<br/>42 rows"]
-        end
-        subgraph KPIS["KPIs Ejecutivos"]
-            G_KPI_V["kpi_ventas_mensuales<br/>65 rows"]
-            G_KPI_M["kpi_mineria<br/>6 rows"]
-        end
-    end
+    BARRIER{{"JOIN — Await.result<br/>Future.sequence · timeout 10 min"}}
 
-    GOLD_START --> GOLD_PARALLEL
-    GOLD_PARALLEL --> SUMMARY["Pipeline Summary<br/>Datalake Report"]
-    SUMMARY --> FINISH([Pipeline Completado])
+    BARRIER --> CHK_HIVE{hiveEnabled<br/>AND no checkpoint<br/>HIVE_AUDIT?}
 
-    style BRONZE_START fill:#cd7f32,color:#fff
-    style SILVER_START fill:#c0c0c0,color:#000
-    style GOLD_START fill:#ffd700,color:#000
+    CHK_HIVE -->|"Sí"| WF3_R["withRetry·3x · critical = false"]
+    WF3_R --> WF3["WF3: HIVE AUDIT<br/>HiveWorkflow<br/>Schema & Data Display<br/>22 tablas"]
+    WF3 --> CPHIVE["✔ .checkpoint_HIVE_AUDIT"]
+    CPHIVE --> WF6
+    CHK_HIVE -->|"No / skip"| WF6
+
+    WF6["WF6: METRICS — MetricsWorkflow<br/>generateReport · exportMetrics<br/>Thread-safe ConcurrentHashMap<br/>Parallel overlap detection"]
+
+    WF6 --> CLEANUP["threadPool.shutdown<br/>spark.stop"]
+    CLEANUP --> FINISH([Pipeline v3.0 Completado])
+
     style START fill:#4caf50,color:#fff
     style FINISH fill:#4caf50,color:#fff
-    style HDFS_INIT fill:#003366,color:#fff
-    style LOCAL_INIT fill:#607d8b,color:#fff
+    style FORK fill:#1565c0,color:#fff,stroke:#0d47a1,stroke-width:3px
+    style BARRIER fill:#1565c0,color:#fff,stroke:#0d47a1,stroke-width:3px
+    style FASE2 fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    style F1 fill:#fce4ec,stroke:#c62828
+    style F2 fill:#f3e5f5,stroke:#6a1b9a
+    style F3 fill:#e0f2f1,stroke:#00695c
+    style FASE1 fill:#fff8e1,stroke:#f57f17,stroke-width:2px
+    style WF1_B fill:#cd7f32,color:#fff
+    style WF1_S fill:#c0c0c0,color:#000
+    style WF1_G fill:#ffd700,color:#000
+    style WF4 fill:#e91e63,color:#fff
+    style WF5 fill:#9c27b0,color:#fff
+    style WF2 fill:#00897b,color:#fff
+    style WF3 fill:#5d4037,color:#fff
+    style WF6 fill:#ff5722,color:#fff
+    style HDFS fill:#003366,color:#fff
+    style LOCAL fill:#607d8b,color:#fff
+    style INIT fill:#37474f,color:#fff
+    style CPETL fill:#81c784,color:#000
+    style CPQ fill:#81c784,color:#000
+    style CPL fill:#81c784,color:#000
+    style CPA fill:#81c784,color:#000
+    style CPHIVE fill:#81c784,color:#000
 ```
 
 ### Estrategia de Paralelización
@@ -202,6 +229,21 @@ flowchart TB
 | **Gold — Facts** | Parcial | `fact_ventas` necesita `silver_segmentacion_clientes`. `fact_produccion_minera` necesita `silver_eficiencia_minera` + `silver_produccion_por_pais` |
 | **Gold — KPIs** | Total | `kpi_ventas_mensuales` y `kpi_mineria` leen de silver sin dependencia cruzada |
 
+### Ejecución Paralela de Workflows (v3.0)
+
+Post-ETL, los workflows **WF4 (Quality)**, **WF5 (Lineage)** y **WF2 (Analytics)** se ejecutan en paralelo usando `scala.concurrent.Future` con un `ExecutionContext` de 2 threads (`Executors.newFixedThreadPool(2)`). Un `Await.result(Future.sequence(...), 10.minutes)` actúa como barrera de sincronización.
+
+| Característica | Implementación |
+|---|---|
+| **Parallel Execution** | `Future` + `ExecutionContext` con thread pool fijo de 2 hilos |
+| **Barrera** | `Await.result(Future.sequence(futures), 10.minutes)` |
+| **Retry con backoff** | `withRetry[T](name, critical, maxRetries=3)` — backoff exponencial (2s, 4s, 6s) |
+| **Checkpoint/Resume** | Archivos `.checkpoints/.checkpoint_<STAGE>` — si existe, se salta el stage |
+| **Thread Safety** | `MetricsWorkflow` usa `ConcurrentHashMap` + `ConcurrentLinkedQueue` + `@volatile` |
+| **Spark master** | `local[2]` — 2 cores para paralelismo interno |
+| **DAG Engine** | `DagExecutor` con detección de ciclos (DFS), ejecución paralela y reporte visual |
+| **Delta MERGE** | `mergeDelta()` para upserts incrementales + `vacuumDelta()` para limpieza |
+
 ### Arquitectura HDFS — Datalake Distribuido
 
 Cuando HDFS está disponible, el datalake se extiende sobre un filesystem distribuido con replicación y tolerancia a fallos:
@@ -209,30 +251,36 @@ Cuando HDFS está disponible, el datalake se extiende sobre un filesystem distri
 ```mermaid
 graph LR
     subgraph HDFS_CLUSTER["HDFS Cluster"]
-        NN[NameNode<br/>hdfs://localhost:9001]
+        NN[NameNode<br/>hdfs://namenode:9000]
         subgraph DataNodes["DataNodes"]
             DN1[DataNode 1]
-            DN2[DataNode 2]
-            DN3[DataNode 3]
         end
     end
 
+    subgraph HIVE_LAYER["Hive Metastore"]
+        HMS[Hive Metastore<br/>thrift://localhost:9083]
+        HS2[HiveServer2<br/>jdbc:hive2://localhost:10000]
+        PG[(PostgreSQL 15<br/>Metastore DB)]
+    end
+
     subgraph DATALAKE_HDFS["/hive/warehouse/datalake"]
-        H_RAW["/raw<br/>CSV replicados"]
-        H_BRONZE["/bronze<br/>Parquet x3 réplica"]
-        H_SILVER["/silver<br/>Parquet x3 réplica"]
-        H_GOLD["/gold<br/>Delta + _delta_log<br/>ACID Transactions"]
+        H_RAW["/raw<br/>CSV originales"]
+        H_BRONZE["/bronze<br/>Parquet"]
+        H_SILVER["/silver<br/>Parquet"]
+        H_GOLD["/gold<br/>Delta Lake<br/>ACID Transactions"]
     end
 
     NN --> DN1
-    NN --> DN2
-    NN --> DN3
 
     DN1 --> H_RAW
-    DN2 --> H_BRONZE
-    DN3 --> H_SILVER
+    DN1 --> H_BRONZE
+    DN1 --> H_SILVER
     DN1 --> H_GOLD
-    DN2 --> H_GOLD
+
+    HMS --> PG
+    HS2 --> HMS
+    HMS -->|cataloga| H_GOLD
+    HMS -->|cataloga| H_SILVER
 
     subgraph SPARK_EXEC["Spark Executors"]
         EX1["Executor 1<br/>Bronze Retail"]
@@ -431,6 +479,15 @@ data-engineer/
 ├── transformation/                  → Motor de procesamiento
 │   ├── spark-jobs/pipelines/
 │   │   ├── batch-etl-scala/         → Pipeline Medallion (Spark + Scala)
+│   │   │   └── src/main/scala/datalake/
+│   │   │       ├── Pipeline.scala           → Entry point v3.0 (parallel + retry + checkpoint)
+│   │   │       ├── config/                  → DatalakeConfig, SparkFactory
+│   │   │       ├── infra/                   → DataLakeIO (MERGE/VACUUM), HdfsManager
+│   │   │       ├── schema/                  → CsvSchemas (7 StructTypes)
+│   │   │       ├── layer/                   → BronzeLayer, SilverLayer, GoldLayer
+│   │   │       ├── analytics/               → BIChartGenerator (JFreeChart)
+│   │   │       ├── engine/                  → DagTask, DagExecutor (DAG paralelo)
+│   │   │       └── workflow/                → 6 workflows (3 paralelos: Quality‖Lineage‖Analytics)
 │   │   ├── stream-processing/       → Spark Streaming + Kafka
 │   │   └── iot-ingestion/           → Kafka IoT Producer
 │   └── notebooks/databricks/
@@ -445,6 +502,8 @@ data-engineer/
 │   └── databricks/                  → Bicep template
 │
 ├── docs/                            → Documentación e imágenes
+│   ├── analytics/                   → Gráficos BI generados (10 PNG)
+│   └── ANALYTICS.md                 → Documentación analítica con insights
 ├── instalacion.md                   → Guía de instalación
 └── README.md                        → Este archivo
 ```
@@ -463,7 +522,7 @@ data-engineer/
 | [`staging/`](staging/) | Zona de staging | CSVs intermedios de transformación |
 | [`staging/transform_csv/`](staging/transform_csv/) | CSVs transformados | 9 archivos de transformación |
 | [`transformation/`](transformation/) | Motor de transformación | Spark jobs, notebooks Databricks |
-| [`transformation/spark-jobs/pipelines/batch-etl-scala/`](transformation/spark-jobs/pipelines/batch-etl-scala/) | Pipeline Medallion principal | Bronze → Silver → Gold en Scala/Spark |
+| [`transformation/spark-jobs/pipelines/batch-etl-scala/`](transformation/spark-jobs/pipelines/batch-etl-scala/) | Pipeline Medallion principal | 18 archivos Scala bajo `datalake.*` — Bronze → Silver → Gold + 6 workflows (3 paralelos) + DAG engine |
 | [`transformation/spark-jobs/pipelines/stream-processing/`](transformation/spark-jobs/pipelines/stream-processing/) | Procesamiento streaming | Spark Structured Streaming + Kafka |
 | [`transformation/spark-jobs/pipelines/iot-ingestion/`](transformation/spark-jobs/pipelines/iot-ingestion/) | Ingesta IoT | Producer Kafka para sensores |
 | [`transformation/notebooks/databricks/`](transformation/notebooks/databricks/) | Notebooks interactivos | Retail-client, Airbnb analytics |
@@ -474,6 +533,8 @@ data-engineer/
 | [`infrastructure/spark-k8s/`](infrastructure/spark-k8s/) | Spark en Kubernetes | Dockerfiles + manifests K8s |
 | [`infrastructure/databricks/`](infrastructure/databricks/) | Databricks IaC | Bicep template (main.bicep) |
 | [`docs/`](docs/) | Documentación | Imágenes y diagramas |
+| [`docs/analytics/`](docs/analytics/) | Gráficos BI Analytics | 10 visualizaciones PNG del Gold layer |
+| [`docs/ANALYTICS.md`](docs/ANALYTICS.md) | Documentación analítica | Insights BI por gráfico y dataset |
 
 ---
 
@@ -543,32 +604,76 @@ graph LR
 | Build Tool | SBT | 1.8.2 |
 | Runtime | Java (Microsoft) | 11 |
 | Formato Bronze/Silver | Apache Parquet | — |
+| **Storage Distribuido** | **Apache HDFS** | **3.3.4** |
+| **Metastore** | **Apache Hive** | **3.1.3** |
+| **Hive Backend** | **MySQL** | **5.7** |
 | Orquestación Cloud | Azure Data Factory | — |
 | Streaming | Apache Kafka | — |
 | Container Orchestration | Kubernetes | — |
 | IaC | Docker Compose / Bicep | — |
+| **BI Charts** | **JFreeChart** | **1.5.4** |
 
 ---
 
 ## Pipeline Medallion — Código Fuente
 
-El pipeline está modularizado en librerías independientes por capa. Cada archivo tiene una responsabilidad única:
+El pipeline está modularizado bajo el paquete `datalake.*` con 7 sub-paquetes de responsabilidad única. La arquitectura sigue principios de **alta cohesión / bajo acoplamiento**, con ejecución paralela, retry y checkpoint:
 
-| Librería | Archivo | Responsabilidad |
-|----------|---------|-----------------|
-| **Entry Point** | [`main.scala`](transformation/spark-jobs/pipelines/batch-etl-scala/src/main/scala/main.scala) | Auto-detección HDFS/Local, inicialización |
-| **Workflow** | [`Workflow.scala`](transformation/spark-jobs/pipelines/batch-etl-scala/src/main/scala/workflow/Workflow.scala) | Orquestador: init → Bronze → Silver → Gold → Summary |
-| **Common** | [`sparksession.scala`](transformation/spark-jobs/pipelines/batch-etl-scala/src/main/scala/common/sparksession.scala) | SparkSession singleton con Delta Lake + Kryo |
-| **Common** | [`Schemas.scala`](transformation/spark-jobs/pipelines/batch-etl-scala/src/main/scala/common/Schemas.scala) | StructType explícitos para las 7 tablas |
-| **Common** | [`DataLakeIO.scala`](transformation/spark-jobs/pipelines/batch-etl-scala/src/main/scala/common/DataLakeIO.scala) | readCsv, writeParquet, writeDelta, pathExists |
-| **Ingest** | [`hdfs.scala`](transformation/spark-jobs/pipelines/batch-etl-scala/src/main/scala/ingest/hdfs.scala) | HDFS operations: isAvailable, upload, mkdir |
-| **Bronze** | [`BronzeLayer.scala`](transformation/spark-jobs/pipelines/batch-etl-scala/src/main/scala/bronze/BronzeLayer.scala) | Schema enforcement, dedup, null filter, audit cols |
-| **Silver** | [`SilverLayer.scala`](transformation/spark-jobs/pipelines/batch-etl-scala/src/main/scala/silver/SilverLayer.scala) | Joins, cálculos financieros, RFM, eficiencia |
-| **Gold** | [`GoldLayer.scala`](transformation/spark-jobs/pipelines/batch-etl-scala/src/main/scala/gold/GoldLayer.scala) | Star Schema: dimensiones, facts, KPIs (Delta) |
+```
+src/main/scala/datalake/
+├── Pipeline.scala                       # Entry point v3.0 — parallel + retry + checkpoint
+├── config/
+│   ├── DatalakeConfig.scala             # Modelo de configuración inmutable
+│   └── SparkFactory.scala               # SparkSession singleton + Delta + Kryo
+├── infra/
+│   ├── DataLakeIO.scala                 # I/O: readCsv, writeParquet, writeDelta
+│   └── HdfsManager.scala               # HDFS: upload, validate, datalake structure
+├── schema/
+│   └── CsvSchemas.scala                 # StructType explícitos (7 tablas)
+├── layer/
+│   ├── BronzeLayer.scala                # RAW → Bronze (schema + dedup + audit cols)
+│   ├── SilverLayer.scala                # Bronze → Silver (joins + business logic)
+│   └── GoldLayer.scala                  # Silver → Gold (Star Schema + Delta Lake)
+├── analytics/
+│   └── BIChartGenerator.scala           # 10 gráficos PNG (JFreeChart headless)
+├── engine/
+│   ├── DagTask.scala                    # Modelo declarativo de task + dependencias
+│   └── DagExecutor.scala               # Motor DAG: paralelismo, retry, checkpoint, cycle detection
+└── workflow/
+    ├── EtlWorkflow.scala                # WF1: Pipeline ETL completo
+    ├── AnalyticsWorkflow.scala          # WF2: Generación de charts BI
+    ├── HiveWorkflow.scala               # WF3: Auditoría Hive + Schema Display
+    ├── DataQualityWorkflow.scala        # WF4: Validación de calidad por capa
+    ├── LineageWorkflow.scala            # WF5: Trazabilidad source→target
+    └── MetricsWorkflow.scala            # WF6: Métricas de ejecución + export JSON
+```
+
+| Paquete | Archivo | Responsabilidad |
+|---------|---------|-----------------|
+| `datalake` | `Pipeline.scala` | Entry point v3.0: parallel workflows, retry con backoff, checkpoint, thread pool |
+| `datalake.config` | `DatalakeConfig.scala` | Case class inmutable con paths de todas las capas + lineage + metrics |
+| `datalake.config` | `SparkFactory.scala` | SparkSession singleton con Delta Lake Extensions + Kryo + tuning |
+| `datalake.infra` | `DataLakeIO.scala` | readCsv con schema, writeParquet coalesce(1), writeDelta, pathExists |
+| `datalake.infra` | `HdfsManager.scala` | buildHadoopConfiguration, createDatalakeStructure, uploadToRaw, validateDatalake |
+| `datalake.schema` | `CsvSchemas.scala` | StructType explícitos para las 7 tablas CSV fuente |
+| `datalake.layer` | `BronzeLayer.scala` | Schema enforcement, deduplicación por claves, filtro de nulos, columnas de auditoría |
+| `datalake.layer` | `SilverLayer.scala` | Joins, cálculos financieros, RFM, eficiencia minera, segmentación |
+| `datalake.layer` | `GoldLayer.scala` | Star Schema: dim_producto, dim_cliente, dim_operador, fact_ventas, fact_produccion_minera, KPIs |
+| `datalake.analytics` | `BIChartGenerator.scala` | Generación headless de 10 gráficos PNG con JFreeChart 1.5.4 |
+| `datalake.engine` | `DagTask.scala` | Modelo declarativo: task ID, dependencias, bloque de ejecución, retry count |
+| `datalake.engine` | `DagExecutor.scala` | Motor DAG: paralelismo por thread pool, cycle detection, retry con backoff, checkpoint |
+| `datalake.workflow` | `EtlWorkflow.scala` | WF1: Setup → Ingest → Bronze(7) → Silver(8) → Gold(7) → Hive Catalog |
+| `datalake.workflow` | `AnalyticsWorkflow.scala` | WF2: Lee Gold/Silver → genera 10 visualizaciones PNG |
+| `datalake.workflow` | `HiveWorkflow.scala` | WF3: Auditoría completa — schema, preview, conteo por capa |
+| `datalake.workflow` | `DataQualityWorkflow.scala` | WF4: Validación de nulls, duplicados, schema conformance, quality score A+/A/B/C/D |
+| `datalake.workflow` | `LineageWorkflow.scala` | WF5: Captura source→target por tabla, exporta manifest JSON a `datalake/lineage/` |
+| `datalake.workflow` | `MetricsWorkflow.scala` | WF6: Thread-safe (ConcurrentHashMap). Timing, throughput, JVM, parallel detection, JSON export |
 
 ---
 
 ## Ejecución
+
+### Modo 1 — Local (sin infraestructura)
 
 ```bash
 cd transformation/spark-jobs/pipelines/batch-etl-scala
@@ -579,32 +684,158 @@ sbt compile
 # Construir fat JAR
 sbt assembly
 
-# Ejecutar pipeline completo
+# Ejecutar pipeline completo (6 workflows — 3 paralelos)
+sbt "runMain datalake.Pipeline"
+```
+
+### Modo 2 — Lakehouse completo (HDFS + Hive)
+
+```bash
+# 1. Levantar infraestructura
+cd infrastructure/hadoop
+docker-compose up -d
+
+# 2. Ejecutar ETL
+cd ../../transformation/spark-jobs/pipelines/batch-etl-scala
+export HDFS_URI="hdfs://localhost:9000"
+export HIVE_METASTORE_URI="thrift://localhost:9083"
+sbt "runMain datalake.Pipeline"
+
+```
+```SQL
+
+-- Consultas en hive
+-- 1. Verificar que existe la base de datos
+SHOW DATABASES;
+
+-- 2. Seleccionar la base de datos del lakehouse
+USE lakehouse;
+
+-- 3. Listar todas las tablas registradas
+SHOW TABLES;
+
+-- 4. Verificar estructura de tablas Gold (Delta)
+DESCRIBE FORMATTED dim_producto;
+DESCRIBE FORMATTED dim_cliente;
+DESCRIBE FORMATTED fact_ventas;
+DESCRIBE FORMATTED kpi_ventas_mensuales;
+DESCRIBE FORMATTED dim_operador;
+DESCRIBE FORMATTED fact_produccion_minera;
+DESCRIBE FORMATTED kpi_mineria;
+
+-- 5. Verificar estructura de tablas Silver (Parquet)
+DESCRIBE FORMATTED silver_catalogo_productos;
+DESCRIBE FORMATTED silver_ventas_enriquecidas;
+DESCRIBE FORMATTED silver_resumen_ventas_mensuales;
+DESCRIBE FORMATTED silver_rentabilidad_producto;
+DESCRIBE FORMATTED silver_segmentacion_clientes;
+DESCRIBE FORMATTED silver_produccion_operador;
+DESCRIBE FORMATTED silver_eficiencia_minera;
+DESCRIBE FORMATTED silver_produccion_por_pais;
+
+-- 6. Validar ubicaciones en HDFS
+SHOW TABLE EXTENDED IN lakehouse LIKE '*';
+
+-- 7. Consulta rápida para confirmar datos en cada capa
+SELECT COUNT(*) AS total_filas FROM fact_ventas;
+SELECT COUNT(*) AS total_filas FROM dim_producto;
+SELECT COUNT(*) AS total_filas FROM kpi_ventas_mensuales;
+SELECT COUNT(*) AS total_filas FROM silver_ventas_enriquecidas;
+
+```
+
+```bash
+# 3. Consultar con Beeline
+docker exec -it hiveserver2 beeline -u jdbc:hive2://localhost:10000
+# > USE lakehouse; SHOW TABLES; SELECT * FROM kpi_ventas_mensuales LIMIT 10;
+```
+
+### Modo 3 — Script E2E automatizado
+
+```bash
+cd infrastructure/hadoop
+bash lakehouse-start.sh
+```
+
+### spark-submit (fat JAR)
+
+```bash
 spark-submit \
-  --class main.MainETL \
+  --class datalake.Pipeline \
   --master "local[*]" \
-  target/scala-2.12/root-assembly-0.0.1.jar
+  --packages io.delta:delta-core_2.12:2.2.0 \
+  target/scala-2.12/root-assembly-1.0.0.jar
 ```
 
 El pipeline detecta automáticamente si HDFS está disponible. Si no, opera en modo local creando el datalake en `./datalake/`.
 
-### Variables de Entorno (opcionales)
+### Variables de Entorno
 
 | Variable | Default | Descripción |
 |----------|---------|-------------|
-| `HDFS_URI` | `hdfs://localhost:9001` | URI del NameNode HDFS |
+| `HDFS_URI` | `hdfs://namenode:9000` | URI del NameNode HDFS |
+| `HIVE_METASTORE_URI` | `thrift://localhost:9083` | URI del Hive Metastore |
 | `CSV_PATH` | `./src/main/resources/csv` | Ruta a los archivos CSV fuente |
+
+### Interfaces Web
+
+| Servicio | URL | Descripción |
+|----------|-----|-------------|
+| NameNode | http://localhost:9870 | HDFS health, browsing |
+| YARN | http://localhost:8088 | Resource manager, jobs |
+| HiveServer2 | http://localhost:10002 | HiveServer2 Web UI |
+| DataNode | http://localhost:9864 | DataNode metrics |
 
 ---
 
 ## Output del Pipeline
 
 ```
-DATA ENGINEERING PIPELINE v0.3
+DATALAKE PIPELINE v3.0 — 6 Workflows (3 paralelos)
 
-  STAGE 1: BRONZE — Data Cleansing         → 7 tablas  (Parquet)
-  STAGE 2: SILVER — Business Logic         → 8 tablas  (Parquet)
-  STAGE 3: GOLD — BI & Analytics Models    → 7 tablas  (Delta Lake)
+  ── SEQUENTIAL PHASE ──────────────────────────────────
+
+  WF1: ETL PIPELINE  [with retry · max 3 attempts · exponential backoff]
+    STAGE 0: HIVE — Metastore Registration   (solo modo HDFS)
+    STAGE 1: BRONZE — Data Cleansing         → 7 tablas  (Parquet)
+    STAGE 2: SILVER — Business Logic         → 8 tablas  (Parquet)
+    STAGE 3: GOLD — BI & Analytics Models    → 7 tablas  (Delta Lake)
+    STAGE 4: HIVE — Catalog Registration     (solo modo HDFS)
+    ✔ Checkpoint: .checkpoints/.checkpoint_ETL
+
+  ── PARALLEL PHASE (Future + ExecutionContext) ────────
+  │
+  ├─ WF4: DATA QUALITY                              ┐
+  │    Bronze Quality: 7/7 tablas | Score: 100.0 ✔   │
+  │    Silver Quality: 8/8 tablas | Score: 100.0 ✔   ├─ Ejecutados en
+  │    Gold Quality:   7/7 tablas | Score: 100.0 ✔   │  paralelo con
+  │    Global Score: 100.0 / 100 — Grade: A+         │  thread pool (2)
+  │    ✔ Checkpoint: .checkpoint_QUALITY              │
+  │                                                   │
+  ├─ WF5: LINEAGE                                    │
+  │    Total: 22/22 tablas con lineage                │
+  │    Manifest: lineage/lineage_<ts>.json            │
+  │    ✔ Checkpoint: .checkpoint_LINEAGE              │
+  │                                                   │
+  ├─ WF2: BI ANALYTICS                               │
+  │    Chart Generation → 10 gráficos PNG             │
+  │    ✔ Checkpoint: .checkpoint_ANALYTICS            │
+  │                                                   ┘
+  └─ ⏳ Await.result(Future.sequence, 10.minutes) ── BARRIER
+
+  ── POST-PARALLEL ─────────────────────────────────────
+
+  WF3: HIVE AUDIT — Schema & Data Display → 22 tablas  (solo modo HDFS)
+
+  WF6: EXECUTION METRICS  [thread-safe · ConcurrentHashMap]
+    ETL:       114.36s | 22 tablas | ████████████████████░░  71.9%
+    Quality:    30.89s | 22 tablas | ████░░░░░░░░░░░░░░░░░  19.4%
+    Lineage:     5.82s | 22 tablas | █░░░░░░░░░░░░░░░░░░░░   3.7%
+    Analytics:  28.41s | 10 charts | ████░░░░░░░░░░░░░░░░░  17.9%
+    ── Parallel workflows: QUALITY‖LINEAGE, QUALITY‖ANALYTICS
+    JVM Memory: 113 MB / 1024 MB (11.0%)
+    Metrics exportados: datalake/metrics/metrics_<timestamp>.json
+    Total pipeline: 158.94s
 
 DATALAKE SUMMARY
   BRONZE (7 tablas — parquet)
@@ -617,4 +848,218 @@ DATALAKE SUMMARY
     ├── fact_produccion_minera     42 filas
     ├── kpi_ventas_mensuales       65 filas
     ├── kpi_mineria                 6 filas
+
+AUDIT REPORT
+  🟤 ═══ BRONZE LAYER (parquet) ═══
+  ┌── BRONZE/categoria ──────────────────────
+  │  Registros: 4 | Columnas: 4
+  │  Schema:
+  │    ├── Cod_Categoria: integer (nullable=true)
+  │    ├── Categoria: string (nullable=true)
+  │    ├── _bronze_ingested_at: timestamp (nullable=false)
+  │    ├── _bronze_source_file: string (nullable=false)
+  │  Preview (5 filas):
+  │  +---------------+----------+--------------------+-------------------+
+  │  |Cod_Categoria  |Categoria |_bronze_ingested_at |_bronze_source_file|
+  │  +---------------+----------+--------------------+-------------------+
+  │  |1              |Bicicletas|2026-04-11 19:51:...|Categoria.csv      |
+  │  ...
+  └────────────────────────────────────────────
+  ...
+  ─── Resumen BRONZE ───
+  Tablas OK: 7 / 7  |  Errores: 0  |  Total filas: 62,888
+
+  ⚪ ═══ SILVER LAYER (parquet) ═══
+  ...
+  ─── Resumen SILVER ───
+  Tablas OK: 8 / 8  |  Errores: 0  |  Total filas: 74,494
+
+  🟡 ═══ GOLD LAYER (delta) ═══
+  ...
+  ─── Resumen GOLD ───
+  Tablas OK: 7 / 7  |  Errores: 0  |  Total filas: 74,382
+```
+
+---
+
+## Workflows de Trazabilidad — WF4, WF5, WF6
+
+El pipeline incluye 3 workflows de trazabilidad que se ejecutan automáticamente después del ETL para garantizar calidad, linaje y observabilidad completa.
+
+### WF4: Data Quality — `DataQualityWorkflow`
+
+Valida cada tabla escrita en las 3 capas de la arquitectura medallón. Se ejecuta automáticamente después del ETL.
+
+| Verificación | Descripción |
+|---|---|
+| **Existencia** | Confirma que cada tabla esperada existe en el path (HDFS o local) |
+| **Schema Conformance** | Valida que el schema tiene columnas y tipos esperados |
+| **Null Rate** | Muestrea 100 filas y calcula el porcentaje de nulls por columna |
+| **Duplicate Rate** | Muestrea filas y detecta duplicados |
+| **Quality Score** | Score compuesto 0-100 con grado: A+ (≥95), A (≥85), B (≥70), C (≥50), D (<50) |
+
+Resultado esperado:
+```
+═══ DATA QUALITY REPORT ═══
+  BRONZE (7 tablas): Score 100.0/100 — All tables validated ✔
+  SILVER (8 tablas): Score 100.0/100 — All tables validated ✔
+  GOLD   (7 tablas): Score 100.0/100 — All tables validated ✔
+  Global Quality Score: 100.0 / 100 — Grade: A+
+```
+
+### WF5: Lineage — `LineageWorkflow`
+
+Captura el linaje de datos de cada tabla: qué fuentes alimentaron cada destino, cuándo se procesó, y cuántas columnas tiene.
+
+| Campo | Descripción |
+|---|---|
+| `layer` | Capa donde reside la tabla (Bronze/Silver/Gold) |
+| `table` | Nombre de la tabla |
+| `sources` | Lista de tablas/archivos fuente |
+| `columns` | Cantidad de columnas del schema |
+| `timestamp` | Momento de captura |
+
+Exporta un manifest JSON a `datalake/lineage/lineage_<timestamp>.json` con el grafo completo:
+```
+═══ DATA LINEAGE GRAPH ═══
+  CSV files ──→ bronze/categoria (4 cols)
+  CSV files ──→ bronze/subcategoria (4 cols)
+  ...
+  bronze/producto + bronze/subcategoria + bronze/categoria ──→ silver/catalogo_productos (8 cols)
+  ...
+  silver/catalogo_productos + silver/rentabilidad_producto ──→ gold/dim_producto (12 cols)
+  ...
+  Total: 22 tablas con lineage capturado
+```
+
+### WF6: Metrics — `MetricsWorkflow`
+
+Captura métricas de ejecución en tiempo real: duración por stage, throughput, uso de memoria JVM.
+
+| Métrica | Descripción |
+|---|---|
+| **Stage Duration** | Tiempo de ejecución de cada workflow (ms) |
+| **Tables Processed** | Tablas procesadas por stage |
+| **Throughput** | Tablas/segundo por stage |
+| **JVM Memory** | Heap usado vs máximo al finalizar |
+| **Bottleneck** | Identifica el stage más lento |
+
+Exporta JSON a `datalake/metrics/metrics_<timestamp>.json`:
+```json
+{
+  "pipeline_start": "2025-07-09T...",
+  "total_duration_sec": 138.28,
+  "stages": [
+    {"name": "ETL", "duration_sec": 99.37, "tables_processed": 22},
+    {"name": "QUALITY", "duration_sec": 11.05, "tables_processed": 22},
+    {"name": "LINEAGE", "duration_sec": 2.32, "tables_processed": 22},
+    {"name": "ANALYTICS", "duration_sec": 15.20, "tables_processed": 10}
+  ],
+  "jvm_memory_mb": 113, "jvm_max_mb": 1024
+}
+```
+
+### Directorios de Salida de Trazabilidad
+
+| Directorio | Workflow | Contenido |
+|------------|----------|-----------|
+| `datalake/lineage/` | WF5 | Manifests JSON con grafo de linaje |
+| `datalake/metrics/` | WF6 | Reports JSON con métricas de ejecución |
+| `docs/analytics/` | WF2 | 10 gráficos PNG generados por JFreeChart |
+
+---
+
+## Auditoría del Pipeline — WF3: Hive Audit
+
+El **WF3: HIVE AUDIT** (`HiveWorkflow`) genera un reporte de auditoría completo recorriendo cada tabla escrita en las tres capas de la arquitectura medallón. Se ejecuta automáticamente al finalizar la escritura y antes de cerrar el SparkContext.
+
+### Qué valida
+
+| Verificación | Descripción |
+|---|---|
+| **Existencia** | Confirma que cada tabla esperada existe en el path (HDFS o local) con `_SUCCESS` marker |
+| **Schema** | Imprime el esquema completo: nombre de columna, tipo de dato (`integer`, `string`, `double`, `timestamp`) y nullable |
+| **Conteo de registros** | Total de filas por tabla y acumulado por capa |
+| **Preview de datos** | Muestra las primeras 5 filas de cada tabla para validación visual |
+| **Integridad por capa** | Resumen de tablas OK vs errores por cada capa (Bronze / Silver / Gold) |
+
+### Función: `HiveWorkflow.run(spark, config)`
+
+```
+Pipeline.main(args)
+  ├── WF1: EtlWorkflow.run()
+  │     ├── STAGE 0: Hive Setup
+  │     ├── STAGE 1: Bronze (7 tablas)
+  │     ├── STAGE 2: Silver (8 tablas)
+  │     ├── STAGE 3: Gold (7 tablas Delta)
+  │     └── STAGE 4: Hive Catalog
+  ├── WF4: DataQualityWorkflow.run()
+  │     ├── validateLayer("BRONZE", 7 tablas, "parquet")
+  │     ├── validateLayer("SILVER", 8 tablas, "parquet")
+  │     └── validateLayer("GOLD", 7 tablas, "delta")
+  ├── WF5: LineageWorkflow.run()
+  │     ├── captureLayerLineage("BRONZE", 7 tablas)
+  │     ├── captureLayerLineage("SILVER", 8 tablas)
+  │     ├── captureLayerLineage("GOLD", 7 tablas)
+  │     └── exportManifest() → datalake/lineage/*.json
+  ├── WF2: AnalyticsWorkflow.run()
+  │     └── BIChartGenerator.generate() → 10 PNG
+  ├── WF3: HiveWorkflow.run() ← Auditoría
+  │     ├── auditLayer("BRONZE", bronzePath, 7 tablas, "parquet")
+  │     ├── auditLayer("SILVER", silverPath, 8 tablas, "parquet")
+  │     └── auditLayer("GOLD", goldPath, 7 tablas, "delta")
+  └── WF6: MetricsWorkflow.generateReport()
+        └── exportMetrics() → datalake/metrics/*.json
+```
+
+### Campos auditados por capa
+
+#### Bronze — Columnas de auditoría automáticas
+Cada tabla Bronze incluye dos columnas de metadatos inyectadas durante el procesamiento:
+
+| Columna | Tipo | Descripción |
+|---|---|---|
+| `_bronze_ingested_at` | `timestamp` | Momento exacto de ingesta a Bronze |
+| `_bronze_source_file` | `string` | Archivo CSV fuente (ej: `Categoria.csv`) |
+
+#### Silver — Transformaciones verificadas
+El audit confirma que los joins y cálculos de negocio produjeron el schema esperado. Ejemplo de campos calculados auditados:
+
+| Tabla | Campos calculados |
+|---|---|
+| `ventas_enriquecidas` | `Ingreso_Bruto`, `Margen_Bruto`, `Pct_Margen`, `Ganancia_Neta`, `Dias_Envio`, `Tipo_Envio` |
+| `segmentacion_clientes` | `Frecuencia`, `Monetary`, `Ticket_Promedio`, `Segmento` (VIP/Premium/Regular/Ocasional) |
+| `eficiencia_minera` | `Produccion_Neta`, `Pct_Desperdicio`, `StdDev_Mineral`, `Eficiencia` (Alta/Media/Baja) |
+
+#### Gold — Modelos Delta Lake verificados
+El audit lee cada tabla Gold en formato Delta, validando que el `_delta_log` sea consistente:
+
+| Tabla | Tipo | Campos clave auditados |
+|---|---|---|
+| `dim_producto` | Dimensión | `clasificacion_rentabilidad`, `clasificacion_rotacion`, `_gold_updated_at` |
+| `dim_cliente` | Dimensión | `segmento`, `ltv_anualizado`, `score_frecuencia`, `score_monetario` |
+| `fact_ventas` | Fact (particionada) | `anio` (partición), `ganancia_neta`, `segmento_cliente` |
+| `kpi_ventas_mensuales` | KPI | `variacion_mom_pct`, `ingreso_ytd`, `margen_ytd` |
+| `dim_operador` | Dimensión | `clasificacion_eficiencia`, `ranking_produccion`, `ranking_eficiencia` |
+| `fact_produccion_minera` | Fact | `coef_variacion_pct`, `pct_contribucion_global` |
+| `kpi_mineria` | KPI | `mineral_por_operador`, `tasa_desperdicio_pct`, `evaluacion_operativa` |
+
+### Resultado esperado del audit
+
+El reporte finaliza con un resumen de integridad por capa:
+
+```
+─── Resumen BRONZE ───
+Tablas OK: 7 / 7  |  Errores: 0  |  Total filas: 62,888
+
+─── Resumen SILVER ───
+Tablas OK: 8 / 8  |  Errores: 0  |  Total filas: 74,494
+
+─── Resumen GOLD ───
+Tablas OK: 7 / 7  |  Errores: 0  |  Total filas: 74,382
+```
+
+Si alguna tabla falla, el reporte indicará:
+```
+✗ GOLD/dim_producto — ERROR: Unable to infer schema for Delta
 ```
