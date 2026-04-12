@@ -2,9 +2,10 @@ package medallion.workflow
 
 import org.apache.spark.sql.SparkSession
 import org.apache.log4j.Logger
-import medallion.config.DatalakeConfig
+import medallion.config.{DatalakeConfig, TableRegistry}
 import medallion.infra.{DataLakeIO, HdfsManager}
 import medallion.layer.{BronzeLayer, SilverLayer, GoldLayer}
+import scala.util.control.NonFatal
 
 /**
  * WORKFLOW 1: ETL Pipeline — RAW → BRONZE → SILVER → GOLD
@@ -150,7 +151,7 @@ object EtlWorkflow {
       spark.sql("CREATE DATABASE IF NOT EXISTS lakehouse")
       spark.sql("USE lakehouse")
       logger.info("✔ Hive database 'lakehouse' creada/seleccionada")
-    } catch { case e: Exception => logger.warn(s"Hive metastore no disponible: ${e.getMessage}") }
+    } catch { case NonFatal(e) => logger.warn(s"Hive metastore no disponible: ${e.getMessage}") }
   }
 
   private def registerHiveCatalog(spark: SparkSession, config: DatalakeConfig): Unit = {
@@ -159,15 +160,15 @@ object EtlWorkflow {
       logger.info("✔ Todas las tablas registradas en Hive Catalog")
       println("  ═══ HIVE CATALOG ═══")
       spark.sql("SHOW TABLES IN lakehouse").show(20, truncate = false)
-    } catch { case e: Exception => logger.warn(s"Error registrando en Hive: ${e.getMessage}") }
+    } catch { case NonFatal(e) => logger.warn(s"Error registrando en Hive: ${e.getMessage}") }
   }
 
   private def ensureHiveCatalog(spark: SparkSession, config: DatalakeConfig): Unit = {
     try {
       spark.sql("USE lakehouse")
       val existingTables = spark.sql("SHOW TABLES IN lakehouse").collect().map(_.getString(1)).toSet
-      val expectedGold = Seq("dim_producto", "dim_cliente", "fact_ventas", "kpi_ventas_mensuales", "dim_operador", "fact_produccion_minera", "kpi_mineria")
-      val expectedSilver = Seq("catalogo_productos", "ventas_enriquecidas", "resumen_ventas_mensuales", "rentabilidad_producto", "segmentacion_clientes", "produccion_operador", "eficiencia_minera", "produccion_por_pais").map(t => s"silver_$t")
+      val expectedGold = TableRegistry.goldNames
+      val expectedSilver = TableRegistry.silverNames.map(t => s"silver_$t")
       val allExpected = expectedGold ++ expectedSilver
       val missing = allExpected.filterNot(existingTables.contains)
       if (missing.isEmpty) {
@@ -176,29 +177,27 @@ object EtlWorkflow {
         logger.info(s"  ⚠ Recuperando ${missing.size} tablas no registradas...")
         registerHiveTables(spark, config)
       }
-    } catch { case e: Exception => logger.warn(s"  Verificación Hive no disponible: ${e.getMessage}") }
+    } catch { case NonFatal(e) => logger.warn(s"  Verificación Hive no disponible: ${e.getMessage}") }
   }
 
   private def registerHiveTables(spark: SparkSession, config: DatalakeConfig): Unit = {
-    val goldTables = Seq("dim_producto", "dim_cliente", "fact_ventas", "kpi_ventas_mensuales", "dim_operador", "fact_produccion_minera", "kpi_mineria")
-    goldTables.foreach { table =>
+    TableRegistry.goldNames.foreach { table =>
       val tablePath = s"${config.goldPath}/$table"
       try {
         if (DataLakeIO.pathExists(tablePath)) {
           spark.sql(s"CREATE TABLE IF NOT EXISTS lakehouse.$table USING DELTA LOCATION '$tablePath'")
           logger.info(s"  ✔ Hive: lakehouse.$table registrada")
         }
-      } catch { case e: Exception => logger.warn(s"  ✗ Hive: lakehouse.$table falló: ${e.getMessage}") }
+      } catch { case NonFatal(e) => logger.warn(s"  ✗ Hive: lakehouse.$table falló: ${e.getMessage}") }
     }
-    val silverTables = Seq("catalogo_productos", "ventas_enriquecidas", "resumen_ventas_mensuales", "rentabilidad_producto", "segmentacion_clientes", "produccion_operador", "eficiencia_minera", "produccion_por_pais")
-    silverTables.foreach { table =>
+    TableRegistry.silverNames.foreach { table =>
       val tablePath = s"${config.silverPath}/$table"
       try {
         if (DataLakeIO.pathExists(tablePath)) {
           spark.sql(s"CREATE TABLE IF NOT EXISTS lakehouse.silver_$table USING PARQUET LOCATION '$tablePath'")
           logger.info(s"  ✔ Hive: lakehouse.silver_$table registrada")
         }
-      } catch { case e: Exception => logger.warn(s"  ✗ Hive: lakehouse.silver_$table falló: ${e.getMessage}") }
+      } catch { case NonFatal(e) => logger.warn(s"  ✗ Hive: lakehouse.silver_$table falló: ${e.getMessage}") }
     }
   }
 
@@ -229,7 +228,7 @@ object EtlWorkflow {
             tables.foreach(t => println(s"    ├── $t"))
           }
         }
-      } catch { case e: Exception => println(s"  $layer — no disponible: ${e.getMessage}") }
+      } catch { case NonFatal(e) => println(s"  $layer — no disponible: ${e.getMessage}") }
     }
     println()
   }
