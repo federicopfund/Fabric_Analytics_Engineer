@@ -1,4 +1,4 @@
-# Data Engineering Platform — Lakehouse Medallion Architecture
+# Fabric Analytics Engineer — Lakehouse Medallion Architecture
 
 ## Idea de Negocio
 
