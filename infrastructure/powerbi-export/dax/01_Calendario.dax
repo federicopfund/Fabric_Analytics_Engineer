@@ -1,0 +1,49 @@
+-- ════════════════════════════════════════════════════════════════════════════
+-- TABLA CALENDARIO (Calculated Table)
+-- Rango: 2010-12-01 → 2014-01-31
+-- Uso: Nueva tabla calculada en Power BI → Modelado → Nueva tabla
+-- Relación: Calendario[Date] → fact_ventas[fecha_orden] (1:*)
+--
+-- EN POWER BI: Modelado → Nueva tabla → pegar desde línea "Calendario = ..."
+-- EN DAX STUDIO: Ejecutar todo el bloque EVALUATE para validar
+-- ════════════════════════════════════════════════════════════════════════════
+
+-- ── Para Power BI (Nueva Tabla) ──────────────────────────────────────────
+-- Calendario =
+-- ADDCOLUMNS(
+--     CALENDAR( DATE(2010, 12, 1), DATE(2014, 1, 31) ),
+--     "Anio",           YEAR( [Date] ),
+--     "Mes",            MONTH( [Date] ),
+--     "Dia",            DAY( [Date] ),
+--     "NombreMes",      FORMAT( [Date], "MMMM" ),
+--     "MesCorto",       FORMAT( [Date], "MMM" ),
+--     "MesAnio",        FORMAT( [Date], "YYYY-MM" ),
+--     "Trimestre",      QUARTER( [Date] ),
+--     "TrimestreLabel", "Q" & QUARTER( [Date] ),
+--     "AnioTrimestre",  YEAR( [Date] ) & "-Q" & QUARTER( [Date] ),
+--     "DiaSemana",      WEEKDAY( [Date], 2 ),
+--     "NombreDia",      FORMAT( [Date], "DDDD" ),
+--     "Semana",         WEEKNUM( [Date], 2 ),
+--     "EsFinDeSemana",  IF( WEEKDAY( [Date], 2 ) >= 6, TRUE(), FALSE() ),
+--     "MesOrden",       YEAR( [Date] ) * 100 + MONTH( [Date] )
+-- )
+
+-- ── Para DAX Studio (validación) ─────────────────────────────────────────
+EVALUATE
+ADDCOLUMNS(
+    CALENDAR( DATE(2010, 12, 1), DATE(2014, 1, 31) ),
+    "Anio",           YEAR( [Date] ),
+    "Mes",            MONTH( [Date] ),
+    "Dia",            DAY( [Date] ),
+    "NombreMes",      FORMAT( [Date], "MMMM" ),
+    "MesCorto",       FORMAT( [Date], "MMM" ),
+    "MesAnio",        FORMAT( [Date], "YYYY-MM" ),
+    "Trimestre",      QUARTER( [Date] ),
+    "TrimestreLabel", "Q" & QUARTER( [Date] ),
+    "AnioTrimestre",  YEAR( [Date] ) & "-Q" & QUARTER( [Date] ),
+    "DiaSemana",      WEEKDAY( [Date], 2 ),
+    "NombreDia",      FORMAT( [Date], "DDDD" ),
+    "Semana",         WEEKNUM( [Date], 2 ),
+    "EsFinDeSemana",  IF( WEEKDAY( [Date], 2 ) >= 6, TRUE(), FALSE() ),
+    "MesOrden",       YEAR( [Date] ) * 100 + MONTH( [Date] )
+)
