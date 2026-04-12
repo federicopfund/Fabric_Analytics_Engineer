@@ -1,27 +1,29 @@
 package medallion
 
-import medallion.config.{DatalakeConfig, SparkFactory}
+import medallion.config.{DatalakeConfig, SparkFactory, TableRegistry}
+import medallion.engine.{DagExecutor, DagTask}
 import medallion.infra.HdfsManager
 import medallion.workflow._
 import org.apache.log4j.{Logger, PropertyConfigurator}
-import scala.concurrent.{Future, Await, ExecutionContext}
-import scala.concurrent.duration._
-import java.util.concurrent.Executors
+import scala.util.control.NonFatal
 
 /**
- * Pipeline v3.0 — Orquestador con ejecución paralela de workflows.
+ * Pipeline v4.0 — Orquestador declarativo basado en DAG.
  *
  * Arquitectura:
- *   1. WF1: ETL Pipeline         (secuencial — Bronze → Silver → Gold)
- *   2. WF4+WF5+WF2: Paralelos   (Quality || Lineage || Analytics) — son read-only
- *   3. WF3: Hive Audit           (secuencial — solo si HDFS)
- *   4. WF6: Metrics Report       (secuencial — barrera final)
+ *   El pipeline se define como un grafo acíclico dirigido (DAG) donde cada
+ *   task declara sus dependencias. El DagExecutor resuelve el orden óptimo,
+ *   paraleliza tasks sin dependencias pendientes, y maneja retry/checkpoint.
  *
- * Features:
- *   - Retry con backoff exponencial por workflow
- *   - Checkpoint por stage para reanudación
- *   - Thread pool controlado para workflows paralelos
- *   - MetricsWorkflow thread-safe con ConcurrentHashMap
+ *   ETL → [QUALITY || LINEAGE || ANALYTICS] → HIVE → METRICS
+ *
+ * Mejoras v4 sobre v3:
+ *   - Declarativo: ~20 líneas de definición de tasks vs ~190 imperativas
+ *   - DagExecutor con errores tipados (Transient/Fatal/Skippable)
+ *   - NonFatal guards (no captura OOM/StackOverflow)
+ *   - Checkpoint con metadatos JSON
+ *   - TableRegistry como fuente única de tablas
+ *   - Tasks no-críticas (critical=false) no bloquean dependientes
  *
  * Ejecutar:
  *   sbt "runMain medallion.Pipeline"
@@ -29,72 +31,6 @@ import java.util.concurrent.Executors
 object Pipeline {
 
   private val logger = Logger.getLogger(getClass.getName)
-
-  private val BRONZE_TABLES = Seq("categoria", "subcategoria", "producto", "ventasinternet", "sucursales", "factmine", "mine")
-  private val SILVER_TABLES = Seq("catalogo_productos", "ventas_enriquecidas", "resumen_ventas_mensuales",
-    "rentabilidad_producto", "segmentacion_clientes", "produccion_operador", "eficiencia_minera", "produccion_por_pais")
-  private val GOLD_TABLES = Seq("dim_producto", "dim_cliente", "fact_ventas", "kpi_ventas_mensuales",
-    "dim_operador", "fact_produccion_minera", "kpi_mineria")
-
-  private val MAX_RETRIES = 3
-  private val PARALLEL_TIMEOUT = 10.minutes
-
-  // ════════════════════════════════════════════════════════
-  // Retry con backoff exponencial
-  // ════════════════════════════════════════════════════════
-
-  /**
-   * Ejecuta un bloque con retry y backoff exponencial.
-   * Si falla después de maxRetries, lanza la última excepción.
-   * @param name      Nombre del workflow para logging
-   * @param critical  Si es false, los fallos se loguean como warning sin re-throw
-   * @param maxRetries Número máximo de reintentos
-   * @param body      Bloque a ejecutar
-   */
-  private def withRetry[T](name: String, critical: Boolean = true, maxRetries: Int = MAX_RETRIES)(body: => T): T = {
-    var lastError: Throwable = null
-    var attempt = 0
-
-    while (attempt < maxRetries) {
-      try {
-        return body
-      } catch {
-        case e: Throwable =>
-          attempt += 1
-          lastError = e
-          if (attempt < maxRetries) {
-            val backoffMs = 2000L * attempt
-            logger.warn(s"⚠ $name — intento $attempt/$maxRetries falló: ${e.getMessage}. Retry en ${backoffMs}ms")
-            Thread.sleep(backoffMs)
-          }
-      }
-    }
-
-    if (critical) {
-      logger.error(s"✗ $name — falló después de $maxRetries intentos: ${lastError.getMessage}")
-      throw lastError
-    } else {
-      logger.warn(s"⚠ $name — falló después de $maxRetries intentos (no crítico): ${lastError.getMessage}")
-      null.asInstanceOf[T]
-    }
-  }
-
-  // ════════════════════════════════════════════════════════
-  // Checkpoint: skip stages ya completados
-  // ════════════════════════════════════════════════════════
-
-  private def isCheckpointed(checkpointPath: String, stage: String): Boolean = {
-    if (checkpointPath.isEmpty) return false
-    new java.io.File(s"$checkpointPath/.checkpoint_$stage").exists()
-  }
-
-  private def writeCheckpoint(checkpointPath: String, stage: String): Unit = {
-    if (checkpointPath.isEmpty) return
-    val dir = new java.io.File(checkpointPath)
-    if (!dir.exists()) dir.mkdirs()
-    new java.io.PrintWriter(s"$checkpointPath/.checkpoint_$stage").close()
-    logger.info(s"  ✔ Checkpoint: $stage")
-  }
 
   // ════════════════════════════════════════════════════════
   // Main
@@ -106,8 +42,8 @@ object Pipeline {
     MetricsWorkflow.startPipeline()
 
     println("╔══════════════════════════════════════════════════════════════╗")
-    println("║        PIPELINE ORCHESTRATOR v3.0 — Data Engineering        ║")
-    println("║        Parallel Workflows | Retry | Checkpoint              ║")
+    println("║        PIPELINE ORCHESTRATOR v4.0 — Data Engineering        ║")
+    println("║        Declarative DAG | Typed Errors | Checkpoint          ║")
     println("╚══════════════════════════════════════════════════════════════╝")
     println()
 
@@ -132,141 +68,111 @@ object Pipeline {
 
     val spark = SparkFactory.getOrCreate(useLocal)
 
-    // Thread pool controlado para workflows parallel (2 threads)
-    val threadPool = Executors.newFixedThreadPool(2)
-    implicit val ec: ExecutionContext = ExecutionContext.fromExecutor(threadPool)
-
     try {
-      val totalTables = BRONZE_TABLES.length + SILVER_TABLES.length + GOLD_TABLES.length
-
       // ══════════════════════════════════════════════════════
-      // FASE 1: ETL Pipeline (secuencial — con retry)
+      // DECLARACIÓN DEL DAG
+      // Cada task declara sus dependencias; el DagExecutor
+      // resuelve la ejecución óptima automáticamente.
       // ══════════════════════════════════════════════════════
-      if (!isCheckpointed(config.checkpointPath, "ETL")) {
-        println("┌──────────────────────────────────────────────────────┐")
-        println("│  WORKFLOW 1: ETL Pipeline                            │")
-        println("│  RAW → BRONZE → SILVER → GOLD                       │")
-        println("└──────────────────────────────────────────────────────┘")
+      val totalTables = TableRegistry.totalTables
 
-        MetricsWorkflow.startStage("ETL")
-        withRetry("WF1:ETL") {
+      val dagTasks = Seq(
+        // WF1: ETL Pipeline (sin dependencias)
+        DagTask.fromUnit("ETL", Set.empty, () => {
+          MetricsWorkflow.startStage("ETL")
           EtlWorkflow.run(spark, config)
-        }
-        MetricsWorkflow.endStage("ETL", totalTables)
-        writeCheckpoint(config.checkpointPath, "ETL")
-      } else {
-        println("  ⏭ WF1:ETL — checkpoint encontrado, skip")
-      }
+          MetricsWorkflow.endStage("ETL", totalTables)
+        }, description = "RAW → Bronze → Silver → Gold"),
 
-      // ══════════════════════════════════════════════════════
-      // FASE 2: Workflows paralelos (Quality || Lineage || Analytics)
-      // Todos son READ-ONLY sobre el datalake ya escrito
-      // ══════════════════════════════════════════════════════
-      println()
-      println("┌──────────────────────────────────────────────────────┐")
-      println("│  PARALLEL PHASE: Quality || Lineage || Analytics     │")
-      println("│  3 workflows ejecutándose concurrentemente           │")
-      println("└──────────────────────────────────────────────────────┘")
-
-      // WF4: Data Quality (paralelo)
-      val qualityFuture = Future {
-        if (!isCheckpointed(config.checkpointPath, "QUALITY")) {
+        // WF4: Data Quality (después de ETL, no-crítico)
+        DagTask.fromUnit("QUALITY", Set("ETL"), () => {
           MetricsWorkflow.startStage("QUALITY")
-          withRetry("WF4:Quality", critical = false) {
-            val bq = DataQualityWorkflow.validateLayer(spark, "BRONZE", config.bronzePath, BRONZE_TABLES, "parquet")
-            val sq = DataQualityWorkflow.validateLayer(spark, "SILVER", config.silverPath, SILVER_TABLES, "parquet")
-            val gq = DataQualityWorkflow.validateLayer(spark, "GOLD", config.goldPath, GOLD_TABLES, "delta")
-            DataQualityWorkflow.printConsolidatedReport(bq ++ sq ++ gq)
-          }
+          val bq = DataQualityWorkflow.validateLayer(spark, "BRONZE", config.bronzePath, TableRegistry.bronzeNames, "parquet")
+          val sq = DataQualityWorkflow.validateLayer(spark, "SILVER", config.silverPath, TableRegistry.silverNames, "parquet")
+          val gq = DataQualityWorkflow.validateLayer(spark, "GOLD", config.goldPath, TableRegistry.goldNames, "delta")
+          DataQualityWorkflow.printConsolidatedReport(bq ++ sq ++ gq)
           MetricsWorkflow.endStage("QUALITY", totalTables)
-          writeCheckpoint(config.checkpointPath, "QUALITY")
-        } else {
-          println("  ⏭ WF4:Quality — checkpoint encontrado, skip")
-        }
-      }
+        }, critical = false, description = "Validación de calidad por capa"),
 
-      // WF5: Lineage (paralelo)
-      val lineageFuture = Future {
-        if (!isCheckpointed(config.checkpointPath, "LINEAGE")) {
+        // WF5: Lineage (después de ETL, no-crítico)
+        DagTask.fromUnit("LINEAGE", Set("ETL"), () => {
           MetricsWorkflow.startStage("LINEAGE")
-          withRetry("WF5:Lineage", critical = false) {
-            val bl = LineageWorkflow.captureLayerLineage(spark, "BRONZE", config.bronzePath, BRONZE_TABLES, "parquet")
-            val sl = LineageWorkflow.captureLayerLineage(spark, "SILVER", config.silverPath, SILVER_TABLES, "parquet")
-            val gl = LineageWorkflow.captureLayerLineage(spark, "GOLD", config.goldPath, GOLD_TABLES, "delta")
-            val all = bl ++ sl ++ gl
-            LineageWorkflow.printLineageGraph(all)
-            if (config.lineagePath.nonEmpty) LineageWorkflow.exportManifest(all, config.lineagePath)
-          }
+          val bl = LineageWorkflow.captureLayerLineage(spark, "BRONZE", config.bronzePath, TableRegistry.bronzeNames, "parquet")
+          val sl = LineageWorkflow.captureLayerLineage(spark, "SILVER", config.silverPath, TableRegistry.silverNames, "parquet")
+          val gl = LineageWorkflow.captureLayerLineage(spark, "GOLD", config.goldPath, TableRegistry.goldNames, "delta")
+          val all = bl ++ sl ++ gl
+          LineageWorkflow.printLineageGraph(all)
+          if (config.lineagePath.nonEmpty) LineageWorkflow.exportManifest(all, config.lineagePath)
           MetricsWorkflow.endStage("LINEAGE", totalTables)
-          writeCheckpoint(config.checkpointPath, "LINEAGE")
-        } else {
-          println("  ⏭ WF5:Lineage — checkpoint encontrado, skip")
-        }
-      }
+        }, critical = false, description = "Captura de linaje de datos"),
 
-      // WF2: BI Analytics (paralelo)
-      val analyticsFuture = Future {
-        if (!isCheckpointed(config.checkpointPath, "ANALYTICS")) {
+        // WF2: BI Analytics (después de ETL, no-crítico)
+        DagTask.fromUnit("ANALYTICS", Set("ETL"), () => {
           MetricsWorkflow.startStage("ANALYTICS")
-          withRetry("WF2:Analytics", critical = false) {
-            val chartsDir = if (config.chartsPath.nonEmpty) config.chartsPath
-              else new java.io.File("./src/main/resources/analytics").getCanonicalPath
-            AnalyticsWorkflow.run(spark, config.goldPath, chartsDir)
-          }
+          val chartsDir = if (config.chartsPath.nonEmpty) config.chartsPath
+            else new java.io.File("./src/main/resources/analytics").getCanonicalPath
+          AnalyticsWorkflow.run(spark, config.goldPath, chartsDir)
           MetricsWorkflow.endStage("ANALYTICS", 10)
-          writeCheckpoint(config.checkpointPath, "ANALYTICS")
-        } else {
-          println("  ⏭ WF2:Analytics — checkpoint encontrado, skip")
-        }
-      }
+        }, critical = false, description = "Generación de gráficos BI"),
 
-      // Barrera: esperar a que los 3 workflows paralelos terminen
-      val parallelPhase = Future.sequence(Seq(qualityFuture, lineageFuture, analyticsFuture))
-      Await.result(parallelPhase, PARALLEL_TIMEOUT)
+        // WF3: Hive Audit (después de Quality+Lineage, solo si HDFS)
+        DagTask(
+          id = "HIVE_AUDIT",
+          dependencies = Set("QUALITY", "LINEAGE"),
+          execute = () => {
+            if (config.hiveEnabled) {
+              MetricsWorkflow.startStage("HIVE_AUDIT")
+              val basePath = s"$hdfsUriRoot/hive/warehouse/datalake"
+              HiveWorkflow.run(spark, basePath, hdfsUriRoot)
+              MetricsWorkflow.endStage("HIVE_AUDIT", TableRegistry.goldNames.length + TableRegistry.silverNames.length)
+            }
+            Right(())
+          },
+          critical = false,
+          description = "Verificación de tablas en catálogo Hive"
+        ),
 
-      println()
-      println("  ✔ PARALLEL PHASE completada — Quality, Lineage, Analytics")
-      println()
+        // WF6: Metrics Report (barrera final — depende de todo)
+        DagTask(
+          id = "METRICS",
+          dependencies = Set("QUALITY", "LINEAGE", "ANALYTICS", "HIVE_AUDIT"),
+          execute = () => {
+            MetricsWorkflow.generateReport()
+            if (config.metricsPath.nonEmpty) MetricsWorkflow.exportMetrics(config.metricsPath)
+            Right(())
+          },
+          description = "Reporte final de métricas"
+        )
+      )
 
       // ══════════════════════════════════════════════════════
-      // FASE 3: Hive Audit (secuencial — solo si HDFS)
+      // EJECUCIÓN DEL DAG
       // ══════════════════════════════════════════════════════
-      if (config.hiveEnabled && !isCheckpointed(config.checkpointPath, "HIVE_AUDIT")) {
-        println("┌──────────────────────────────────────────────────────┐")
-        println("│  WORKFLOW 3: Hive Audit                              │")
-        println("│  Verificación de tablas Delta en catálogo Hive       │")
-        println("└──────────────────────────────────────────────────────┘")
-        MetricsWorkflow.startStage("HIVE_AUDIT")
-        withRetry("WF3:HiveAudit", critical = false) {
-          val basePath = s"$hdfsUriRoot/hive/warehouse/datalake"
-          HiveWorkflow.run(spark, basePath, hdfsUriRoot)
-        }
-        MetricsWorkflow.endStage("HIVE_AUDIT", GOLD_TABLES.length + SILVER_TABLES.length)
-        writeCheckpoint(config.checkpointPath, "HIVE_AUDIT")
-      }
+      val executor = new DagExecutor(
+        tasks = dagTasks,
+        parallelism = 3,  // Quality || Lineage || Analytics en paralelo
+        checkpointPath = config.checkpointPath
+      )
 
-      // ══════════════════════════════════════════════════════
-      // FASE 4: Metrics Report (barrera final)
-      // ══════════════════════════════════════════════════════
-      MetricsWorkflow.generateReport()
-      if (config.metricsPath.nonEmpty) MetricsWorkflow.exportMetrics(config.metricsPath)
+      val results = executor.execute()
 
       // ══════════════════════════════════════════════════════
       // RESUMEN FINAL
       // ══════════════════════════════════════════════════════
       println("╔══════════════════════════════════════════════════════════════╗")
-      println("║              ORCHESTRATOR v3.0 COMPLETADO                   ║")
+      println("║              ORCHESTRATOR v4.0 COMPLETADO                   ║")
       println("╠══════════════════════════════════════════════════════════════╣")
       println(s"║  Modo: ${if (useLocal) "LOCAL" else "HDFS + Hive"}")
-      println(s"║  Parallel: Quality || Lineage || Analytics")
-      println(s"║  Retry: ${MAX_RETRIES}x con backoff exponencial")
+      println(s"║  DAG: ${dagTasks.length} tasks, parallelism=3")
       println(s"║  Checkpoint: ${if (config.checkpointPath.nonEmpty) config.checkpointPath else "disabled"}")
-      println(s"║  Workflows: ETL → [Quality||Lineage||Analytics] → ${if (config.hiveEnabled) "Hive → " else ""}Metrics")
-      println(s"║  Tablas: Bronze=${BRONZE_TABLES.length} Silver=${SILVER_TABLES.length} Gold=${GOLD_TABLES.length}")
+      println(s"║  Tablas: Bronze=${TableRegistry.bronzeNames.length} Silver=${TableRegistry.silverNames.length} Gold=${TableRegistry.goldNames.length}")
       println("╚══════════════════════════════════════════════════════════════╝")
 
+    } catch {
+      case NonFatal(e) =>
+        logger.error(s"Pipeline falló: ${e.getMessage}", e)
+        throw e
     } finally {
-      threadPool.shutdown()
       spark.stop()
     }
   }
