@@ -1,0 +1,144 @@
+# ═══════════════════════════════════════════════════════════════
+# IBM Cloud Monitoring — Sysdig Dashboard
+# ═══════════════════════════════════════════════════════════════
+# Import via Sysdig Monitor console → Dashboards → Import JSON
+# ═══════════════════════════════════════════════════════════════
+
+dashboard:
+  name: "Medallion Data Pipeline"
+  description: "Real-time monitoring of the IBM Cloud data pipeline"
+  layout:
+    type: grid
+    columns: 12
+
+  panels:
+    # ── Row 1: Overview ──
+    - title: "Pipeline Status"
+      type: number
+      gridPos: { x: 0, y: 0, w: 3, h: 4 }
+      query:
+        metric: ibm_analytics_engine.spark_app.count
+        aggregation: sum
+        filter:
+          state: "finished"
+        timeRange: 24h
+
+    - title: "Failed Applications"
+      type: number
+      gridPos: { x: 3, y: 0, w: 3, h: 4 }
+      query:
+        metric: ibm_analytics_engine.spark_app.count
+        aggregation: sum
+        filter:
+          state: "failed"
+        timeRange: 24h
+      thresholds:
+        - value: 0
+          color: green
+        - value: 1
+          color: red
+
+    - title: "Avg Duration (min)"
+      type: number
+      gridPos: { x: 6, y: 0, w: 3, h: 4 }
+      query:
+        metric: ibm_analytics_engine.spark_app.duration_seconds
+        aggregation: avg
+        transform: "value / 60"
+        timeRange: 24h
+
+    - title: "Total COS Storage (GB)"
+      type: number
+      gridPos: { x: 9, y: 0, w: 3, h: 4 }
+      query:
+        metric: ibm_cos.bucket.bytes_used
+        aggregation: sum
+        transform: "value / 1073741824"
+        filter:
+          bucket_name: "datalake-*"
+
+    # ── Row 2: Time Series ──
+    - title: "Spark Application Timeline"
+      type: timeseries
+      gridPos: { x: 0, y: 4, w: 6, h: 6 }
+      queries:
+        - metric: ibm_analytics_engine.spark_app.count
+          label: "Finished"
+          filter: { state: "finished" }
+          color: green
+        - metric: ibm_analytics_engine.spark_app.count
+          label: "Failed"
+          filter: { state: "failed" }
+          color: red
+        - metric: ibm_analytics_engine.spark_app.count
+          label: "Running"
+          filter: { state: "running" }
+          color: blue
+
+    - title: "COS Storage by Layer"
+      type: timeseries
+      gridPos: { x: 6, y: 4, w: 6, h: 6 }
+      queries:
+        - metric: ibm_cos.bucket.bytes_used
+          label: "Raw"
+          filter: { bucket_name: "datalake-raw-*" }
+          color: gray
+        - metric: ibm_cos.bucket.bytes_used
+          label: "Bronze"
+          filter: { bucket_name: "datalake-bronze-*" }
+          color: "#CD7F32"
+        - metric: ibm_cos.bucket.bytes_used
+          label: "Silver"
+          filter: { bucket_name: "datalake-silver-*" }
+          color: silver
+        - metric: ibm_cos.bucket.bytes_used
+          label: "Gold"
+          filter: { bucket_name: "datalake-gold-*" }
+          color: gold
+
+    # ── Row 3: COS Operations ──
+    - title: "COS Request Rate"
+      type: timeseries
+      gridPos: { x: 0, y: 10, w: 6, h: 5 }
+      queries:
+        - metric: ibm_cos.bucket.requests.read
+          label: "Reads"
+          color: blue
+        - metric: ibm_cos.bucket.requests.write
+          label: "Writes"
+          color: orange
+
+    - title: "Db2 Active Connections"
+      type: timeseries
+      gridPos: { x: 6, y: 10, w: 6, h: 5 }
+      queries:
+        - metric: ibm_db2.connections.active
+          label: "Active"
+          color: green
+        - metric: ibm_db2.connections.failed
+          label: "Failed"
+          color: red
+
+    # ── Row 4: IKS Cluster (optional) ──
+    - title: "IKS CPU Usage"
+      type: timeseries
+      gridPos: { x: 0, y: 15, w: 4, h: 5 }
+      query:
+        metric: kubernetes.node.cpu.usage.percent
+        aggregation: avg
+
+    - title: "IKS Memory Usage"
+      type: timeseries
+      gridPos: { x: 4, y: 15, w: 4, h: 5 }
+      query:
+        metric: kubernetes.node.memory.usage.percent
+        aggregation: avg
+
+    - title: "Spark Pods"
+      type: table
+      gridPos: { x: 8, y: 15, w: 4, h: 5 }
+      query:
+        metric: kubernetes.pod.status.phase
+        groupBy: [pod_name, phase]
+        filter:
+          namespace: "spark"
