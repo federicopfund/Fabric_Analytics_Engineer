@@ -1,0 +1,149 @@
+# ═══════════════════════════════════════════════════════════════
+# Tekton Pipeline — Medallion Data Pipeline CI/CD
+# ═══════════════════════════════════════════════════════════════
+# Stages:
+#   1. clone-repo        — Git checkout
+#   2. run-tests         — Unit tests (pytest + ScalaTest)
+#   3. security-scan     — Dependency vulnerability scanning
+#   4. build-jar         — Scala fat JAR (sbt assembly)
+#   5. build-image       — Docker image (Kaniko)
+#   6. upload-to-cos     — JAR → COS for Analytics Engine
+#   7. submit-to-ae      — Submit Spark application
+#   8. deploy-to-iks     — Deploy Spark workers to IKS (optional)
+#   9. notify            — Slack/webhook notification
+# ═══════════════════════════════════════════════════════════════
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: medallion-data-pipeline
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+    app.kubernetes.io/component: ci-cd
+spec:
+  params:
+    - name: git-url
+      type: string
+      default: "https://github.com/federicopfund/Fabric_Analytics_Engineer"
+    - name: git-branch
+      type: string
+      default: "main"
+    - name: cos-endpoint
+      type: string
+      default: "s3.us-south.cloud-object-storage.appdomain.cloud"
+    - name: ae-instance-id
+      type: string
+      description: "Analytics Engine Serverless instance ID"
+    - name: deploy-target
+      type: string
+      default: "ae"
+      description: "Deployment target: ae (Analytics Engine), iks (Kubernetes), or both"
+    - name: notify-webhook
+      type: string
+      default: ""
+      description: "Webhook URL for notifications (Slack, Teams, etc.)"
+
+  workspaces:
+    - name: source
+    - name: credentials
+
+  tasks:
+    # ── 1. Clone Repository ──
+    - name: clone-repo
+      taskRef:
+        name: git-clone
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-branch)
+      workspaces:
+        - name: output
+          workspace: source
+
+    # ── 2. Run Tests ──
+    - name: run-tests
+      runAfter: [clone-repo]
+      taskRef:
+        name: run-spark-tests
+      workspaces:
+        - name: source
+          workspace: source
+
+    # ── 3. Security Scan ──
+    - name: security-scan
+      runAfter: [clone-repo]
+      taskRef:
+        name: security-scan
+      workspaces:
+        - name: source
+          workspace: source
+
+    # ── 4. Build FAT JAR ──
+    - name: build-jar
+      runAfter: [run-tests, security-scan]
+      taskRef:
+        name: build-scala-jar
+      workspaces:
+        - name: source
+          workspace: source
+
+    # ── 5. Upload JAR to COS ──
+    - name: upload-to-cos
+      runAfter: [build-jar]
+      taskRef:
+        name: upload-jar-to-cos
+      params:
+        - name: cos-endpoint
+          value: $(params.cos-endpoint)
+      workspaces:
+        - name: source
+          workspace: source
+        - name: credentials
+          workspace: credentials
+
+    # ── 6. Submit to Analytics Engine ──
+    - name: submit-to-ae
+      runAfter: [upload-to-cos]
+      taskRef:
+        name: submit-to-ae
+      params:
+        - name: ae-instance-id
+          value: $(params.ae-instance-id)
+        - name: cos-endpoint
+          value: $(params.cos-endpoint)
+      workspaces:
+        - name: credentials
+          workspace: credentials
+
+    # ── 7. Build and Push Docker Image ──
+    - name: build-image
+      runAfter: [run-tests, security-scan]
+      taskRef:
+        name: build-push-image
+      workspaces:
+        - name: source
+          workspace: source
+
+    # ── 8. Deploy to IKS ──
+    - name: deploy
+      runAfter: [build-image]
+      taskRef:
+        name: deploy-to-iks
+      workspaces:
+        - name: source
+          workspace: source
+        - name: credentials
+          workspace: credentials
+
+  finally:
+    # ── 9. Notification (always runs) ──
+    - name: notify
+      taskRef:
+        name: send-notification
+      params:
+        - name: webhook-url
+          value: $(params.notify-webhook)
+        - name: pipeline-name
+          value: "medallion-data-pipeline"
+        - name: git-branch
+          value: $(params.git-branch)
