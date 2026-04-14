@@ -1,0 +1,42 @@
+# ═══════════════════════════════════════════════════════════════
+# Terraform Variables — Copy to terraform.tfvars and fill in
+# ═══════════════════════════════════════════════════════════════
+# IMPORTANT: Never commit terraform.tfvars to git!
+
+# ── Authentication (REQUIRED) ──
+ibmcloud_api_key = ""
+
+# ── Project ──
+project_name = "medallion"
+environment  = "dev"       # dev | staging | prod
+cost_center  = "data-engineering"
+
+# ── Region & Resource Group ──
+region         = "us-south"
+resource_group = "Default"
+
+# ── IKS Cluster ──
+cluster_zone  = "us-south-1"
+worker_count  = 2
+worker_flavor = "bx2.4x16"
+kube_version  = "1.30"
+
+# ── COS ──
+cos_instance_name = "CloudObjectStorage"
+
+# ── Database ──
+db2_plan = "free"          # free | standard | enterprise
+
+# ── GitHub ──
+github_repo_url = "https://github.com/federicopfund/Fabric_Analytics_Engineer"
+
+# ── Networking ──
+allowed_cidr = "0.0.0.0/0" # Restrict in production!
+
+# ── Feature Flags (enable for staging/prod) ──
+enable_key_protect        = false
+enable_secrets_manager    = false
+enable_activity_tracker   = false
+enable_log_analysis       = false
+enable_monitoring         = false
+enable_lifecycle_policies = false
