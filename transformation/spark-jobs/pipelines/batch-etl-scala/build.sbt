@@ -42,7 +42,10 @@ lazy val libraryDeps = Seq(
   "org.jfree" % "jfreechart" % "1.5.4",
 
   // JDBC — Db2 on Cloud driver para exportación Gold → Db2
-  "com.ibm.db2" % "jcc" % "11.5.9.0"
+  "com.ibm.db2" % "jcc" % "11.5.9.0",
+
+  // Testing
+  "org.scalatest" %% "scalatest" % "3.2.17" % Test
 )
 
 lazy val root = (project in file("."))
