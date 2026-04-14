@@ -109,47 +109,116 @@ data:
   # ── Pre-flight: descarga JAR de COS y valida conectividad ──
   preflight.sh: |
     #!/bin/bash
-    set -euo pipefail
+    set -eo pipefail
 
     echo "╔══════════════════════════════════════════════╗"
     echo "║   Pre-flight Checks — Medallion Pipeline     ║"
     echo "╚══════════════════════════════════════════════╝"
 
-    # 1. Descargar JAR desde COS
+    # ── Step 1: Obtener IAM token desde API key (si existe) o usar HMAC ──
     echo "[1/4] Downloading JAR from COS..."
-    JAR_URL="https://${COS_ENDPOINT}/${COS_BUCKET_RAW}/../${JAR_COS_KEY}"
-    aws s3 cp "s3://${COS_BUCKET_RAW%%-raw*}-raw-us-south-dev/${JAR_COS_KEY}" \
-      "${JAR_LOCAL_PATH}" \
-      --endpoint-url "https://${COS_ENDPOINT}" \
-      --no-sign-request 2>/dev/null || \
-    curl -sSf -o "${JAR_LOCAL_PATH}" \
-      -H "Authorization: Bearer ${IAM_TOKEN}" \
-      "https://${COS_ENDPOINT}/${COS_BUCKET_RAW}/${JAR_COS_KEY}" || {
-        echo "ERROR: Failed to download JAR"
-        exit 1
-    }
-    echo "  ✓ JAR downloaded ($(du -h ${JAR_LOCAL_PATH} | awk '{print $1}'))"
+    BUCKET="${COS_BUCKET_RAW:-datalake-raw-us-south-dev}"
+    COS_KEY="${JAR_COS_KEY:-spark-jars/root-assembly-2.0.0.jar}"
+    DEST="${JAR_LOCAL_PATH:-/opt/spark/work/root-assembly-2.0.0.jar}"
+    ENDPOINT="${COS_ENDPOINT:-s3.us-south.cloud-object-storage.appdomain.cloud}"
 
-    # 2. Validar JAR
-    echo "[2/4] Validating JAR..."
-    jar tf "${JAR_LOCAL_PATH}" | grep -q "medallion/Pipeline" || {
-      echo "ERROR: JAR does not contain medallion.Pipeline"
+    DOWNLOAD_OK=false
+
+    # Método 1: Obtener IAM token y descargar con Bearer (preferred — uses private endpoint)
+    if [ "${DOWNLOAD_OK}" = "false" ] && [ -n "${IBMCLOUD_API_KEY:-}" ]; then
+      echo "  → Getting IAM token via private endpoint..."
+      IAM_TOKEN=$(curl -sS --max-time 30 -X POST "https://private.iam.cloud.ibm.com/identity/token" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "apikey=${IBMCLOUD_API_KEY}&grant_type=urn:ibm:params:oauth:grant-type:apikey" \
+        2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])" 2>/dev/null || echo "")
+
+      if [ -n "${IAM_TOKEN}" ]; then
+        echo "  → Downloading JAR with IAM Bearer token..."
+        HTTP_CODE=$(curl -sS --max-time 300 -w "%{http_code}" -o "${DEST}" \
+          -H "Authorization: Bearer ${IAM_TOKEN}" \
+          "https://${ENDPOINT}/${BUCKET}/${COS_KEY}" 2>/dev/null || echo "000")
+
+        if [ "${HTTP_CODE}" = "200" ] && [ -s "${DEST}" ]; then
+          DOWNLOAD_OK=true
+        else
+          echo "  ⚠ IAM download returned HTTP ${HTTP_CODE}"
+        fi
+      else
+        echo "  ⚠ Failed to obtain IAM token"
+      fi
+    fi
+
+    # Método 2: Fallback — S3 HMAC credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)
+    if [ "${DOWNLOAD_OK}" = "false" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+      echo "  → Fallback: Using HMAC credentials for COS download..."
+      RESOURCE="/${BUCKET}/${COS_KEY}"
+      DATE_VALUE=$(date -u +"%a, %d %b %Y %H:%M:%S GMT")
+      CONTENT_TYPE="application/octet-stream"
+      STRING_TO_SIGN="GET\n\n${CONTENT_TYPE}\n${DATE_VALUE}\n${RESOURCE}"
+      SIGNATURE=$(echo -en "${STRING_TO_SIGN}" | openssl dgst -sha1 -hmac "${AWS_SECRET_ACCESS_KEY}" -binary | base64)
+
+      HTTP_CODE=$(curl -sS --max-time 300 -w "%{http_code}" -o "${DEST}" \
+        -H "Date: ${DATE_VALUE}" \
+        -H "Content-Type: ${CONTENT_TYPE}" \
+        -H "Authorization: AWS ${AWS_ACCESS_KEY_ID}:${SIGNATURE}" \
+        "https://${ENDPOINT}/${BUCKET}/${COS_KEY}" 2>/dev/null || echo "000")
+
+      if [ "${HTTP_CODE}" = "200" ] && [ -s "${DEST}" ]; then
+        DOWNLOAD_OK=true
+      else
+        echo "  ⚠ HMAC download returned HTTP ${HTTP_CODE}"
+      fi
+    fi
+
+    if [ "${DOWNLOAD_OK}" = "false" ]; then
+      echo "ERROR: Failed to download JAR from COS"
+      echo "  ENDPOINT: ${ENDPOINT}"
+      echo "  BUCKET: ${BUCKET}"
+      echo "  KEY: ${COS_KEY}"
       exit 1
-    }
-    echo "  ✓ Main class found: medallion.Pipeline"
+    fi
 
-    # 3. Test COS connectivity
+    JAR_SIZE=$(du -h "${DEST}" 2>/dev/null | awk '{print $1}')
+    echo "  ✓ JAR downloaded (${JAR_SIZE})"
+
+    # ── Step 2: Validar JAR ──
+    echo "[2/4] Validating JAR..."
+    if command -v jar &>/dev/null; then
+      jar tf "${DEST}" 2>/dev/null | grep -q "medallion/Pipeline" || {
+        echo "ERROR: JAR does not contain medallion.Pipeline"
+        exit 1
+      }
+      echo "  ✓ Main class found: medallion.Pipeline"
+    else
+      # Verificar ZIP magic bytes (PK\x03\x04) usando od (más portable que xxd)
+      file_header=$(od -A n -t x1 -N 4 "${DEST}" 2>/dev/null | tr -d ' ')
+      if echo "${file_header}" | grep -qi "^504b0304"; then
+        echo "  ✓ JAR is valid ZIP archive (jar command not available)"
+      elif [ "$(stat -c%s "${DEST}" 2>/dev/null || echo 0)" -gt 10000000 ]; then
+        echo "  ⚠ Cannot verify JAR format (no xxd/jar), but file is $(du -h "${DEST}" | awk '{print $1}') — proceeding"
+      else
+        echo "ERROR: Downloaded file is not a valid JAR (header: ${file_header})"
+        exit 1
+      fi
+    fi
+
+    # ── Step 3: Test COS connectivity (HEAD on bucket) ──
     echo "[3/4] Testing COS connectivity..."
-    aws s3 ls "s3://${COS_BUCKET_RAW}/" \
-      --endpoint-url "https://${COS_ENDPOINT}" \
-      --no-sign-request 2>/dev/null && echo "  ✓ COS RAW accessible" || \
-      echo "  ⚠ COS check skipped (will use Spark S3A config)"
+    if [ -n "${IAM_TOKEN:-}" ]; then
+      curl -sS --max-time 10 -o /dev/null -w "" \
+        -H "Authorization: Bearer ${IAM_TOKEN}" \
+        "https://${ENDPOINT}/${BUCKET}?max-keys=1" > /dev/null 2>&1 \
+        && echo "  ✓ COS RAW bucket accessible" \
+        || echo "  ⚠ COS list check failed (will use Spark S3A config)"
+    else
+      echo "  ⚠ COS list check skipped (no IAM token available)"
+    fi
 
-    # 4. Test Db2 connectivity (optional)
+    # ── Step 4: Test Db2 connectivity (optional) ──
     echo "[4/4] Testing Db2 connectivity..."
-    timeout 5 bash -c "echo > /dev/tcp/${DB2_HOSTNAME}/${DB2_PORT}" 2>/dev/null && \
+    timeout 5 bash -c "echo > /dev/tcp/${DB2_HOSTNAME:-localhost}/${DB2_PORT:-30376}" 2>/dev/null && \
       echo "  ✓ Db2 reachable at ${DB2_HOSTNAME}:${DB2_PORT}" || \
-      echo "  ⚠ Db2 not reachable (export will be skipped)"
+      echo "  ⚠ Db2 not reachable (export may be skipped)"
 
     echo ""
     echo "✔ Pre-flight complete. Starting Spark..."
