@@ -27,10 +27,14 @@
 10. [Pipeline Medallion — Código Fuente (Scala)](#pipeline-medallion--código-fuente)
 11. [Pipeline Medallion — Notebooks IBM Cloud (PySpark)](#pipeline-medallion--notebooks-ibm-cloud-pyspark)
 12. [Infraestructura IBM Cloud — CI/CD y Terraform](#infraestructura-ibm-cloud--cicd-y-terraform)
+    - [Arquitectura de Infraestructura Completa — IBM Cloud](#arquitectura-de-infraestructura-completa--ibm-cloud)
+    - [CI/CD Pipeline — Tekton 9-Stage Architecture](#cicd-pipeline--tekton-9-stage-architecture)
+    - [DevOps Lifecycle — Procesos Operativos](#devops-lifecycle--procesos-operativos)
 13. [Ejecución](#ejecución)
     - [Modo 1 — Local (sin infraestructura)](#modo-1--local-sin-infraestructura)
     - [Modo 2 — Lakehouse completo (HDFS + Hive)](#modo-2--lakehouse-completo-hdfs--hive)
     - [Modo 3 — Script E2E automatizado](#modo-3--script-e2e-automatizado)
+    - [Modo 4 — IBM Analytics Engine Serverless](#modo-4--ibm-analytics-engine-serverless)
     - [spark-submit (fat JAR)](#spark-submit-fat-jar)
     - [Variables de Entorno](#variables-de-entorno)
     - [Interfaces Web](#interfaces-web)
@@ -685,7 +689,7 @@ graph LR
 
 | Componente | Tecnología | Versión |
 |------------|-----------|---------|
-| Motor de Procesamiento | Apache Spark | 3.3.1 |
+| Motor de Procesamiento | Apache Spark | 3.3.1 (local) / 3.5 (AE Serverless) |
 | Lenguaje | Scala | 2.12.13 |
 | Formato Gold | Delta Lake | 2.2.0 |
 | Build Tool | SBT | 1.8.2 |
@@ -699,6 +703,7 @@ graph LR
 | Container Orchestration | Kubernetes | — |
 | IaC | Docker Compose / Bicep / Terraform | — |
 | **BI Charts** | **JFreeChart** | **1.5.4** |
+| **Serverless Spark** | **IBM Analytics Engine** | **Spark 3.5** |
 | Cloud Storage | IBM Cloud Object Storage (S3A) | — |
 | Cloud Database | IBM Db2 on Cloud | — |
 | CI/CD | Tekton Pipelines | — |
@@ -742,7 +747,8 @@ src/main/scala/medallion/
 |---------|---------|-----------------|
 | `medallion` | `Pipeline.scala` | Entry point v3.0: parallel workflows, retry con backoff, checkpoint, thread pool |
 | `medallion.config` | `DatalakeConfig.scala` | Case class inmutable con paths de todas las capas + lineage + metrics |
-| `medallion.config` | `SparkFactory.scala` | SparkSession singleton con Delta Lake Extensions + Kryo + tuning |
+| `medallion.config` | `IbmCloudConfig.scala` | Detección de modo (AE/HDFS/Local), config COS S3A, IAM token, CLI fallback |
+| `medallion.config` | `SparkFactory.scala` | SparkSession singleton con 3 modos: AE (S3A), HDFS (Hive), Local |
 | `medallion.infra` | `DataLakeIO.scala` | readCsv con schema, writeParquet coalesce(1), writeDelta, pathExists |
 | `medallion.infra` | `HdfsManager.scala` | buildHadoopConfiguration, createDatalakeStructure, uploadToRaw, validateDatalake |
 | `medallion.schema` | `CsvSchemas.scala` | StructType explícitos para las 7 tablas CSV fuente |
@@ -767,24 +773,67 @@ Implementación alternativa del pipeline Medallion usando **PySpark notebooks** 
 
 ### Arquitectura IBM Cloud
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    IBM Cloud Object Storage                      │
-│  ┌──────────────┐ ┌────────────────┐ ┌────────────────────────┐ │
-│  │ datalake-raw  │ │ datalake-bronze │ │ datalake-silver        │ │
-│  │  (CSV)        │ │  (Parquet)      │ │  (Parquet)             │ │
-│  └──────┬───────┘ └───────┬────────┘ └──────────┬─────────────┘ │
-│         │                 │                      │               │
-│  ┌──────┴─────────────────┴──────────────────────┴─────────────┐ │
-│  │                    PySpark (local[*])                         │ │
-│  │  01_bronze_layer → 02_silver_layer → 03_gold_layer           │ │
-│  └──────────────────────────────────────────────┬──────────────┘ │
-│                                                  │               │
-│  ┌──────────────────────────────────────────────┴──────────────┐ │
-│  │ datalake-gold  (Parquet — Star Schema: 4 dims + 2 facts     │ │
-│  │                 + 2 KPIs = 8 tablas)                         │ │
-│  └──────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph SOURCES["Fuentes de Datos"]
+        CSV_SRC["CSV Files<br/>7 archivos · 2 dominios"]
+        DB_SRC["SQL Server<br/>Transaccional"]
+    end
+
+    subgraph IBM_CLOUD["IBM Cloud — Pipeline Medallion (PySpark)"]
+        direction TB
+
+        subgraph COS["IBM Cloud Object Storage (S3A)"]
+            RAW["datalake-raw/<br/>CSV Originales"]
+            BRONZE["datalake-bronze/<br/>Parquet · 7 tablas"]
+            SILVER["datalake-silver/<br/>Parquet · 8 tablas"]
+            GOLD["datalake-gold/<br/>Parquet · Star Schema<br/>4 dims + 2 facts + 2 KPIs"]
+        end
+
+        subgraph NOTEBOOKS["PySpark Notebooks (local ∗)"]
+            NB1["01_bronze_layer.ipynb<br/>Schema + Dedup + Audit"]
+            NB2["02_silver_layer.ipynb<br/>Joins + RFM + Business Logic"]
+            NB3["03_gold_layer.ipynb<br/>Star Schema + Validación"]
+            ORCH["orchestrator.py<br/>CLI (nbconvert)"]
+            ORCH -.->|"secuencial"| NB1
+            ORCH -.->|"secuencial"| NB2
+            ORCH -.->|"secuencial"| NB3
+        end
+
+        subgraph PERSIST["Persistencia"]
+            DB2["IBM Db2 on Cloud<br/>JDBC · Gold Tables"]
+        end
+    end
+
+    subgraph CONSUME["Consumo"]
+        PBI["Power BI<br/>Dashboards"]
+        ANALYST["Data Analyst<br/>SQL Ad-hoc"]
+    end
+
+    CSV_SRC -->|"upload"| RAW
+    DB_SRC -->|"export"| RAW
+
+    RAW -->|"read CSV"| NB1
+    NB1 -->|"write Parquet"| BRONZE
+    BRONZE -->|"read Parquet"| NB2
+    NB2 -->|"write Parquet"| SILVER
+    SILVER -->|"read Parquet"| NB3
+    NB3 -->|"write Parquet"| GOLD
+
+    GOLD -->|"JDBC bulk"| DB2
+    GOLD -->|"DirectQuery"| PBI
+    DB2 -->|"SQL queries"| ANALYST
+
+    style IBM_CLOUD fill:#0f62fe08,stroke:#0f62fe,stroke-width:3px
+    style COS fill:#0072c320,stroke:#0072c3,stroke-width:2px
+    style NOTEBOOKS fill:#ff832b20,stroke:#ff832b,stroke-width:2px
+    style PERSIST fill:#009d9a20,stroke:#009d9a,stroke-width:2px
+    style RAW fill:#ff9800,color:#000
+    style BRONZE fill:#cd7f32,color:#fff
+    style SILVER fill:#c0c0c0,color:#000
+    style GOLD fill:#ffd700,color:#000
+    style DB2 fill:#009d9a,color:#fff
+    style PBI fill:#f2c811,color:#000
 ```
 
 ### Notebooks
@@ -823,6 +872,274 @@ Implementación alternativa del pipeline Medallion usando **PySpark notebooks** 
 
 Infraestructura como código para desplegar el pipeline Medallion en IBM Cloud, incluyendo aprovisionamiento de recursos con Terraform y CI/CD con Tekton Pipelines.
 
+### Arquitectura de Infraestructura — IBM Cloud
+
+```mermaid
+graph TB
+    subgraph INFRA["IBM Cloud — Infraestructura Provisionada (Terraform)"]
+        direction TB
+
+        subgraph NETWORK["1. Networking — VPC Gen2"]
+            VPC["VPC<br/>medallion-vpc"]
+            SUBNET["Compute Subnet<br/>256 IPs"]
+            PGW["Public Gateway<br/>Egress"]
+            SG["Security Groups<br/>Spark inbound/outbound"]
+            ACL["Network ACLs<br/>HTTPS + VPC CIDR"]
+            VPC --> SUBNET
+            SUBNET --> PGW
+            VPC --> SG
+            VPC --> ACL
+        end
+
+        subgraph SECURITY["2. Security & Identity"]
+            KP["Key Protect<br/>COS Root Key<br/>Envelope Encryption"]
+            SM["Secrets Manager<br/>Centralized Credentials"]
+            IAM_AG1["IAM: data-engineers<br/>COS Writer · Db2 Manager<br/>AE Manager"]
+            IAM_AG2["IAM: data-analysts<br/>COS Reader · Db2 Viewer"]
+        end
+
+        subgraph COMPUTE["3. Compute"]
+            IKS["IKS Cluster<br/>VPC Gen2 · K8s 1.29<br/>Spark Workers"]
+            AE["Analytics Engine<br/>Serverless Spark 3.5"]
+        end
+
+        subgraph STORAGE["4. Storage — COS Medallion Buckets"]
+            B_RAW["raw/<br/>Archive 90d · Expire 365d"]
+            B_BRONZE["bronze/<br/>Standard"]
+            B_SILVER["silver/<br/>Standard"]
+            B_GOLD["gold/<br/>Retention 7-365d"]
+            B_LOGS["logs/<br/>Expire 30d"]
+        end
+
+        subgraph DATABASE["5. Database & ETL"]
+            DB2["Db2 on Cloud<br/>Gold Persistence"]
+            DS["DataStage<br/>ETL Orchestration"]
+        end
+
+        subgraph OBSERVE["6. Observability"]
+            AT["Activity Tracker<br/>API Audit"]
+            LA["Log Analysis<br/>Centralized Logs"]
+            SYSDIG["Sysdig Monitoring<br/>12 Panels · 7 Alerts"]
+        end
+
+        subgraph CICD_INFRA["7. CI/CD"]
+            CD["Continuous Delivery"]
+            TC["Toolchain<br/>GitHub Integration"]
+            TEKTON["Tekton Pipelines<br/>9-Stage Pipeline"]
+        end
+    end
+
+    KP -.->|"encrypts"| STORAGE
+    SM -.->|"credentials"| AE
+    SM -.->|"HMAC keys"| STORAGE
+    SUBNET --> IKS
+    IKS -.->|"workers"| AE
+    AE -->|"s3a://"| STORAGE
+    B_GOLD -->|"JDBC"| DB2
+    STORAGE -.->|"events"| AT
+    AE -.->|"logs"| LA
+    AE -.->|"metrics"| SYSDIG
+    TC --> TEKTON
+
+    style INFRA fill:#16161608,stroke:#0f62fe,stroke-width:3px
+    style NETWORK fill:#0043ce15,stroke:#0043ce,stroke-width:2px
+    style SECURITY fill:#8a3ffc15,stroke:#8a3ffc,stroke-width:2px
+    style COMPUTE fill:#ff832b15,stroke:#ff832b,stroke-width:2px
+    style STORAGE fill:#0072c315,stroke:#0072c3,stroke-width:2px
+    style DATABASE fill:#009d9a15,stroke:#009d9a,stroke-width:2px
+    style OBSERVE fill:#42be6515,stroke:#42be65,stroke-width:2px
+    style CICD_INFRA fill:#f1c21b15,stroke:#f1c21b,stroke-width:2px
+    style VPC fill:#0043ce,color:#fff
+    style KP fill:#8a3ffc,color:#fff
+    style SM fill:#8a3ffc,color:#fff
+    style IKS fill:#326ce5,color:#fff
+    style AE fill:#ff832b,color:#fff
+    style B_RAW fill:#ff9800,color:#000
+    style B_BRONZE fill:#cd7f32,color:#fff
+    style B_SILVER fill:#c0c0c0,color:#000
+    style B_GOLD fill:#ffd700,color:#000
+    style DB2 fill:#009d9a,color:#fff
+    style SYSDIG fill:#42be65,color:#fff
+    style TEKTON fill:#f1c21b,color:#000
+```
+
+### CI/CD Pipeline — Tekton 9-Stage Architecture
+
+```mermaid
+flowchart LR
+    subgraph TRIGGER["Trigger Layer"]
+        GH_PUSH["GitHub Push<br/>→ main"]
+        GH_PR["GitHub PR<br/>→ any branch"]
+        WEBHOOK["EventListener<br/>+ TriggerBinding"]
+    end
+
+    subgraph PIPELINE["Tekton Pipeline — medallion-data-pipeline"]
+        direction LR
+
+        subgraph STAGE_1["Stage 1"]
+            CLONE["clone-repo<br/>Git Checkout"]
+        end
+
+        subgraph PARALLEL_A["Parallel Gate A"]
+            direction TB
+            TEST["run-tests<br/>pytest + ScalaTest"]
+            SCAN["security-scan<br/>pip-audit · detect-secrets<br/>Trivy Container"]
+        end
+
+        subgraph STAGE_4["Stage 4"]
+            BUILD_JAR["build-jar<br/>sbt assembly<br/>Fat JAR"]
+        end
+
+        subgraph SERVERLESS_PATH["Serverless Path (AE)"]
+            direction TB
+            UPLOAD["upload-to-cos<br/>JAR → COS s3a://"]
+            SUBMIT["submit-to-ae<br/>Spark App Submit<br/>AE Serverless 3.5"]
+            UPLOAD --> SUBMIT
+        end
+
+        subgraph CONTAINER_PATH["Container Path (IKS)"]
+            direction TB
+            BUILD_IMG["build-image<br/>Kaniko Build<br/>+ Registry Push"]
+            DEPLOY["deploy-to-iks<br/>kubectl apply<br/>IKS Cluster"]
+            BUILD_IMG --> DEPLOY
+        end
+    end
+
+    subgraph FINALLY["Finally Block"]
+        NOTIFY["notify<br/>Slack / Webhook<br/>Status Report"]
+    end
+
+    GH_PUSH -->|"full deploy"| WEBHOOK
+    GH_PR -->|"test only"| WEBHOOK
+    WEBHOOK --> CLONE
+
+    CLONE --> TEST
+    CLONE --> SCAN
+
+    TEST --> BUILD_JAR
+    SCAN --> BUILD_JAR
+
+    BUILD_JAR --> UPLOAD
+    TEST --> BUILD_IMG
+    SCAN --> BUILD_IMG
+
+    SUBMIT -.->|"always"| NOTIFY
+    DEPLOY -.->|"always"| NOTIFY
+
+    style TRIGGER fill:#16161615,stroke:#161616,stroke-width:2px
+    style PIPELINE fill:#0f62fe08,stroke:#0f62fe,stroke-width:3px
+    style FINALLY fill:#da1e2815,stroke:#da1e28,stroke-width:2px
+    style SERVERLESS_PATH fill:#ff832b10,stroke:#ff832b,stroke-width:2px
+    style CONTAINER_PATH fill:#326ce510,stroke:#326ce5,stroke-width:2px
+    style PARALLEL_A fill:#42be6510,stroke:#42be65,stroke-width:2px
+    style CLONE fill:#393939,color:#fff
+    style TEST fill:#42be65,color:#fff
+    style SCAN fill:#da1e28,color:#fff
+    style BUILD_JAR fill:#f1c21b,color:#000
+    style UPLOAD fill:#0072c3,color:#fff
+    style SUBMIT fill:#ff832b,color:#fff
+    style BUILD_IMG fill:#0072c3,color:#fff
+    style DEPLOY fill:#326ce5,color:#fff
+    style NOTIFY fill:#a56eff,color:#fff
+    style GH_PUSH fill:#24292e,color:#fff
+    style GH_PR fill:#24292e,color:#fff
+```
+
+### DevOps Lifecycle — Procesos Operativos
+
+```mermaid
+flowchart TB
+    subgraph PLAN["PLAN"]
+        REQ["Requirements<br/>Business KPIs"]
+        ARCH["Architecture<br/>Medallion Design"]
+        REQ --> ARCH
+    end
+
+    subgraph CODE["CODE"]
+        DEV_LOCAL["Local Development<br/>sbt compile · sbt test"]
+        BRANCH["Feature Branch<br/>Git Flow"]
+        PR["Pull Request<br/>Code Review"]
+        DEV_LOCAL --> BRANCH --> PR
+    end
+
+    subgraph BUILD["BUILD & TEST"]
+        direction TB
+        UNIT["Unit Tests<br/>ScalaTest + pytest"]
+        SEC["Security Scan<br/>pip-audit · detect-secrets<br/>Trivy · SAST"]
+        SBT["sbt assembly<br/>Fat JAR Build"]
+        KANIKO["Kaniko<br/>Container Image"]
+        UNIT --> SBT
+        SEC --> SBT
+        SBT --> KANIKO
+    end
+
+    subgraph RELEASE["RELEASE"]
+        COS_UP["Upload to COS<br/>Versioned JAR"]
+        REG["Container Registry<br/>Image Tag"]
+        COS_UP --> |"Serverless"| AE_SUBMIT
+        REG --> |"Container"| K8S_DEPLOY
+        AE_SUBMIT["AE Submit<br/>Spark App"]
+        K8S_DEPLOY["IKS Deploy<br/>kubectl apply"]
+    end
+
+    subgraph OPERATE["OPERATE"]
+        direction TB
+        HEALTH["Health Checks<br/>health-check.sh<br/>COS · Db2 · AE · IKS"]
+        ROTATE["Credential Rotation<br/>rotate-credentials.sh<br/>HMAC · Db2 · API Keys"]
+        LIFECYCLE["COS Lifecycle<br/>cos-lifecycle.sh<br/>Archive · Expire · Abort"]
+        DESTROY["Safe Teardown<br/>destroy.sh<br/>Confirmation Gates"]
+    end
+
+    subgraph MONITOR["MONITOR & FEEDBACK"]
+        direction TB
+        SYSDIG_D["Sysdig Dashboard<br/>12 Panels · 4 Rows"]
+        ALERTS["Alert Policies<br/>7 Active Alerts"]
+        AUDIT["Activity Tracker<br/>API Audit Trail"]
+        LOGS["Log Analysis<br/>Spark Logs"]
+        SYSDIG_D --- ALERTS
+        AUDIT --- LOGS
+    end
+
+    subgraph INFRA_OPS["INFRASTRUCTURE AS CODE"]
+        direction TB
+        TF_PLAN["terraform plan<br/>Preview Changes"]
+        TF_APPLY["terraform apply<br/>Provision Resources"]
+        TF_STATE["Remote State<br/>COS Backend<br/>Locking"]
+        ENVS["Environments<br/>dev · staging · prod"]
+        TF_PLAN --> TF_APPLY --> TF_STATE
+        ENVS -.-> TF_PLAN
+    end
+
+    PLAN ==> CODE
+    CODE ==>|"PR Merge → main"| BUILD
+    BUILD ==> RELEASE
+    RELEASE ==> OPERATE
+    OPERATE ==> MONITOR
+    MONITOR ==>|"Feedback Loop"| PLAN
+
+    INFRA_OPS -.->|"provisions"| RELEASE
+    INFRA_OPS -.->|"configures"| MONITOR
+    MONITOR -.->|"incidents"| OPERATE
+
+    style PLAN fill:#0043ce,color:#fff,stroke:#0043ce,stroke-width:2px
+    style CODE fill:#6929c4,color:#fff,stroke:#6929c4,stroke-width:2px
+    style BUILD fill:#42be65,color:#000,stroke:#42be65,stroke-width:2px
+    style RELEASE fill:#ff832b,color:#000,stroke:#ff832b,stroke-width:2px
+    style OPERATE fill:#009d9a,color:#fff,stroke:#009d9a,stroke-width:2px
+    style MONITOR fill:#f1c21b,color:#000,stroke:#f1c21b,stroke-width:2px
+    style INFRA_OPS fill:#393939,color:#fff,stroke:#393939,stroke-width:2px
+    style HEALTH fill:#009d9a,color:#fff
+    style ROTATE fill:#8a3ffc,color:#fff
+    style LIFECYCLE fill:#0072c3,color:#fff
+    style DESTROY fill:#da1e28,color:#fff
+    style SYSDIG_D fill:#f1c21b,color:#000
+    style ALERTS fill:#da1e28,color:#fff
+    style AE_SUBMIT fill:#ff832b,color:#fff
+    style K8S_DEPLOY fill:#326ce5,color:#fff
+    style SEC fill:#da1e28,color:#fff
+    style TF_APPLY fill:#7c3aed,color:#fff
+```
+
 ### Terraform — Aprovisionamiento
 
 | Archivo | Descripción |
@@ -847,6 +1164,7 @@ Infraestructura como código para desplegar el pipeline Medallion en IBM Cloud, 
 | [`setup.sh`](infrastructure/ibm-cloud/scripts/setup.sh) | Setup inicial del entorno IBM Cloud |
 | [`deploy-spark.sh`](infrastructure/ibm-cloud/scripts/deploy-spark.sh) | Deploy del cluster Spark |
 | [`setup-cicd.sh`](infrastructure/ibm-cloud/scripts/setup-cicd.sh) | Configuración del pipeline CI/CD |
+| [`submit-to-ae.sh`](infrastructure/ibm-cloud/scripts/submit-to-ae.sh) | **Build → Upload COS → Submit a Analytics Engine Serverless** |
 
 ---
 
@@ -936,6 +1254,175 @@ cd infrastructure/hadoop
 bash lakehouse-start.sh
 ```
 
+### Modo 4 — IBM Analytics Engine Serverless
+
+Ejecución del pipeline Medallion v5.0 sobre **IBM Analytics Engine Serverless (Spark 3.5)** con datos almacenados en **IBM Cloud Object Storage (COS)** via protocolo **S3A**.
+
+#### Arquitectura de Ejecución en AE
+
+```mermaid
+graph TB
+    subgraph DEV["Development Environment"]
+        direction LR
+        CS["Codespace / Local Dev<br/>sbt assembly"]
+        JAR["root-assembly-2.0.0.jar<br/>Fat JAR (Scala 2.12 + Delta)"]
+        CS -->|"sbt assembly"| JAR
+    end
+
+    subgraph IBM["IBM Cloud — us-south"]
+        direction TB
+
+        subgraph IAM_LAYER["IAM & Security"]
+            IAM["IBM IAM<br/>API Key + Bearer Token"]
+            KP["Key Protect<br/>Root Key Encryption"]
+            SM["Secrets Manager<br/>HMAC + DB Credentials"]
+        end
+
+        subgraph COS_LAYER["IBM Cloud Object Storage (S3A Protocol)"]
+            COS_JARS["COS: spark-jars/<br/>*.jar uploads"]
+            COS_RAW["COS: datalake-raw/<br/>CSV Originales"]
+            COS_BRONZE["COS: datalake-bronze/<br/>Parquet · 7 tablas"]
+            COS_SILVER["COS: datalake-silver/<br/>Parquet · 8 tablas"]
+            COS_GOLD["COS: datalake-gold/<br/>Delta Lake · 7 tablas"]
+            COS_LOGS["COS: datalake-logs/<br/>Audit Trails"]
+        end
+
+        subgraph AE_LAYER["Analytics Engine Serverless"]
+            AE["Spark 3.5 Runtime<br/>EXECUTION_MODE=IBM_AE"]
+            DRIVER["Spark Driver<br/>Pipeline.scala Entry Point"]
+            EXEC1["Executor 1<br/>Bronze + Silver Retail"]
+            EXEC2["Executor 2<br/>Silver Mining + Gold"]
+            AE --> DRIVER
+            DRIVER --> EXEC1
+            DRIVER --> EXEC2
+        end
+
+        subgraph OBSERVE["Observability"]
+            AT["Activity Tracker<br/>API Audit Logs"]
+            LA["Log Analysis<br/>Spark Driver/Executor Logs"]
+            MON["Sysdig Monitoring<br/>Metrics + Alerts"]
+        end
+
+        subgraph DB_LAYER["Database"]
+            DB2["Db2 on Cloud<br/>JDBC · Gold Persistence"]
+        end
+    end
+
+    JAR -->|"ibmcloud cos upload<br/>s3a://datalake-raw/spark-jars/"| COS_JARS
+    CS -->|"ibmcloud ae-v3<br/>spark-app submit"| AE
+
+    IAM -.->|"Bearer Token"| AE
+    SM -.->|"HMAC Keys"| COS_LAYER
+    KP -.->|"Envelope Encryption"| COS_LAYER
+
+    COS_JARS -->|"JAR Classpath"| AE
+    COS_RAW -->|"s3a:// read"| EXEC1
+    EXEC1 -->|"s3a:// write"| COS_BRONZE
+    COS_BRONZE -->|"s3a:// read"| EXEC1
+    EXEC1 -->|"s3a:// write"| COS_SILVER
+    COS_SILVER -->|"s3a:// read"| EXEC2
+    EXEC2 -->|"s3a:// write"| COS_GOLD
+
+    COS_GOLD -->|"JDBC bulk load"| DB2
+
+    DRIVER -.->|"Logs"| LA
+    AE -.->|"Metrics"| MON
+    COS_LAYER -.->|"Access Events"| AT
+
+    style DEV fill:#263238,color:#fff,stroke:#37474f,stroke-width:2px
+    style IBM fill:#0f62fe08,stroke:#0f62fe,stroke-width:3px
+    style IAM_LAYER fill:#be95ff20,stroke:#8a3ffc,stroke-width:2px
+    style COS_LAYER fill:#0072c320,stroke:#0072c3,stroke-width:2px
+    style AE_LAYER fill:#ff832b20,stroke:#ff832b,stroke-width:2px
+    style OBSERVE fill:#42be6520,stroke:#42be65,stroke-width:2px
+    style DB_LAYER fill:#009d9a20,stroke:#009d9a,stroke-width:2px
+    style AE fill:#ff832b,color:#fff
+    style DRIVER fill:#e25a1c,color:#fff
+    style EXEC1 fill:#e25a1c,color:#fff
+    style EXEC2 fill:#e25a1c,color:#fff
+    style COS_RAW fill:#ff9800,color:#000
+    style COS_BRONZE fill:#cd7f32,color:#fff
+    style COS_SILVER fill:#c0c0c0,color:#000
+    style COS_GOLD fill:#ffd700,color:#000
+    style DB2 fill:#009d9a,color:#fff
+    style IAM fill:#8a3ffc,color:#fff
+    style KP fill:#8a3ffc,color:#fff
+    style SM fill:#8a3ffc,color:#fff
+```
+
+#### Requisitos
+
+```bash
+# Instalar IBM Cloud CLI + plugins
+curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
+ibmcloud plugin install cloud-object-storage -f
+ibmcloud plugin install analytics-engine-v3 -f
+
+# Autenticarse
+ibmcloud login --sso
+ibmcloud target -r us-south -g Default
+```
+
+#### Ejecución Completa (Build + Upload + Submit)
+
+```bash
+# Pipeline completo: compilar JAR → subir a COS → ejecutar en AE
+./infrastructure/ibm-cloud/scripts/submit-to-ae.sh
+
+# Solo submit (JAR previamente compilado)
+./infrastructure/ibm-cloud/scripts/submit-to-ae.sh --skip-build
+```
+
+#### Monitoreo
+
+```bash
+# Estado de la aplicación
+./infrastructure/ibm-cloud/scripts/submit-to-ae.sh --status <app_id>
+
+# Logs del driver
+./infrastructure/ibm-cloud/scripts/submit-to-ae.sh --logs <app_id>
+
+# Listar todas las aplicaciones
+./infrastructure/ibm-cloud/scripts/submit-to-ae.sh --list
+```
+
+#### Detección Automática de Modo
+
+El pipeline v5.0 auto-detecta el entorno de ejecución con esta prioridad:
+
+```
+1. EXECUTION_MODE env var (IBM_AE | HDFS | LOCAL)
+      ↓ no definido
+2. IBM AE API (IAM token + HTTP)
+      ↓ 403 / no disponible
+3. ibmcloud CLI plugin (ae-v3 instance show --id)
+      ↓ CLI no instalado
+4. COS_ACCESS_KEY presente → asumir AE
+      ↓ sin COS
+5. HDFS disponible → HdfsCluster
+      ↓ sin HDFS
+6. LocalMode (filesystem local)
+```
+
+#### Resultado Exitoso
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║  IBM Analytics Engine — Spark Application Submitter         ║
+║  Pipeline Medallion v5.0 (Serverless Spark 3.5)             ║
+╚══════════════════════════════════════════════════════════════╝
+
+[INFO] Analytics Engine: ACTIVE (Spark 3.5) ✔
+[INFO] JAR subido a COS ✔
+[INFO] Aplicación enviada ✔
+[INFO] Application ID: ad4c2f25-3bbd-46d7-b02e-2ffa99ca1b6a
+
+State:        finished
+Start time:   2026-04-13T23:11:31Z
+End time:     2026-04-13T23:13:54Z
+Duration:     ~2 min 23 seg
+```
+
 ### spark-submit (fat JAR)
 
 ```bash
@@ -946,7 +1433,7 @@ spark-submit \
   target/scala-2.12/root-assembly-1.0.0.jar
 ```
 
-El pipeline detecta automáticamente si HDFS está disponible. Si no, opera en modo local creando el datalake en `./datalake/`.
+El pipeline detecta automáticamente el entorno de ejecución: IBM Analytics Engine Serverless (via `EXECUTION_MODE` o detección automática), HDFS + Hive, o modo local. Consultar [Modo 4](#modo-4--ibm-analytics-engine-serverless) para detalles de la detección.
 
 ### Variables de Entorno
 
@@ -955,6 +1442,12 @@ El pipeline detecta automáticamente si HDFS está disponible. Si no, opera en m
 | `HDFS_URI` | `hdfs://namenode:9000` | URI del NameNode HDFS |
 | `HIVE_METASTORE_URI` | `thrift://localhost:9083` | URI del Hive Metastore |
 | `CSV_PATH` | `./src/main/resources/csv` | Ruta a los archivos CSV fuente |
+| `EXECUTION_MODE` | *(auto-detect)* | Forzar modo: `IBM_AE`, `HDFS` o `LOCAL` |
+| `AE_INSTANCE_ID` | — | ID de instancia Analytics Engine |
+| `AE_API_KEY` | — | API key de IBM Cloud para AE |
+| `COS_ACCESS_KEY` | — | HMAC access key de IBM COS |
+| `COS_SECRET_KEY` | — | HMAC secret key de IBM COS |
+| `COS_ENDPOINT` | `s3.us-south.cloud-object-storage.appdomain.cloud` | Endpoint S3A de IBM COS |
 
 ### Interfaces Web
 
