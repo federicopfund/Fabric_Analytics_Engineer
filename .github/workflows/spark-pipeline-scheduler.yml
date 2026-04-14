@@ -13,9 +13,9 @@
 name: Spark Pipeline — Medallion v6.0
 
 on:
-  # ── Cron automático (diario 06:00 UTC) ──
+  # ── Cron automático (cada hora) ──
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 * * * *'
 
   # ── Trigger manual ──
   workflow_dispatch:
