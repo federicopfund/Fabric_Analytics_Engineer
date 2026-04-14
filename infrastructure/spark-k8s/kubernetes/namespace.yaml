@@ -1,0 +1,13 @@
+# ═══════════════════════════════════════════════════════════════
+# Namespace — Aislamiento del pipeline Spark Medallion
+# ═══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spark-medallion
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+    app.kubernetes.io/managed-by: kubectl
+    environment: production
+  annotations:
+    description: "Pipeline Medallion — Spark ETL on Kubernetes (IKS)"
