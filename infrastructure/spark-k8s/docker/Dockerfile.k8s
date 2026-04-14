@@ -1,0 +1,91 @@
+# ═══════════════════════════════════════════════════════════════
+# Multi-stage Dockerfile — Spark Medallion Pipeline (JDK 11)
+#
+# Stage 1: Builder — descarga Spark + Hadoop + Delta
+# Stage 2: Runtime — imagen mínima con JRE 11 + Spark binaries
+#
+# Tamaño estimado: ~850MB (vs ~1.5GB single-stage)
+# ═══════════════════════════════════════════════════════════════
+
+# ── Stage 1: Builder ──────────────────────────────────────────
+FROM eclipse-temurin:11-jdk-jammy AS builder
+
+ARG SPARK_VERSION=3.3.1
+ARG HADOOP_VERSION=3
+ARG DELTA_VERSION=2.2.0
+ARG SCALA_VERSION=2.12
+ARG AWS_SDK_VERSION=1.12.262
+ARG HADOOP_AWS_VERSION=3.3.4
+ARG DB2_DRIVER_VERSION=11.5.9.0
+
+WORKDIR /build
+
+# Descargar Spark
+RUN curl -fsSL "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz" \
+    | tar -xz --strip-components=1 -C /build
+
+# Descargar JARs adicionales (Delta Lake, S3A, Db2)
+RUN cd /build/jars && \
+    curl -fsSLO "https://repo1.maven.org/maven2/io/delta/delta-core_${SCALA_VERSION}/${DELTA_VERSION}/delta-core_${SCALA_VERSION}-${DELTA_VERSION}.jar" && \
+    curl -fsSLO "https://repo1.maven.org/maven2/io/delta/delta-storage/${DELTA_VERSION}/delta-storage-${DELTA_VERSION}.jar" && \
+    curl -fsSLO "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/${HADOOP_AWS_VERSION}/hadoop-aws-${HADOOP_AWS_VERSION}.jar" && \
+    curl -fsSLO "https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/${AWS_SDK_VERSION}/aws-java-sdk-bundle-${AWS_SDK_VERSION}.jar" && \
+    curl -fsSLO "https://repo1.maven.org/maven2/com/ibm/db2/jcc/${DB2_DRIVER_VERSION}/jcc-${DB2_DRIVER_VERSION}.jar"
+
+# Limpiar JARs innecesarios
+RUN cd /build/jars && \
+    rm -f *kubernetes-client*.jar *mesos*.jar *yarn*.jar 2>/dev/null || true
+
+
+# ── Stage 2: Runtime ──────────────────────────────────────────
+FROM eclipse-temurin:11-jre-jammy
+
+LABEL maintainer="federico.pfund@data-engineer"
+LABEL description="Spark Medallion Pipeline — K8s CronJob Runtime"
+LABEL spark.version="3.3.1"
+LABEL scala.version="2.12.13"
+LABEL delta.version="2.2.0"
+
+# Argumentos heredados
+ARG SPARK_VERSION=3.3.1
+ARG SPARK_UID=185
+ARG SPARK_GID=185
+
+# Crear usuario no-root
+RUN groupadd -g ${SPARK_GID} spark && \
+    useradd -u ${SPARK_UID} -g spark -m -s /bin/bash spark
+
+# Instalar utilidades mínimas
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends \
+      tini procps curl bash coreutils && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copiar Spark desde builder
+COPY --from=builder /build /opt/spark
+
+# Crear directorios de trabajo
+RUN mkdir -p /opt/spark/work /opt/spark/logs /opt/spark/conf /opt/spark/scripts /tmp/spark && \
+    chown -R spark:spark /opt/spark /tmp/spark
+
+# Variables de entorno
+ENV SPARK_HOME=/opt/spark \
+    SPARK_CONF_DIR=/opt/spark/conf \
+    SPARK_LOG_DIR=/opt/spark/logs \
+    PATH="/opt/spark/bin:/opt/spark/sbin:${PATH}" \
+    JAVA_HOME=/opt/java/openjdk \
+    SPARK_NO_DAEMONIZE=true
+
+# Copiar entrypoint
+COPY docker/entrypoint.sh /opt/spark/entrypoint.sh
+RUN chmod +x /opt/spark/entrypoint.sh
+
+# Puerto Spark UI
+EXPOSE 4040 7078 7079
+
+# Usuario no-root
+USER spark
+WORKDIR /opt/spark/work
+
+# Entrypoint con tini (PID 1 reaping)
+ENTRYPOINT ["tini", "--", "/opt/spark/entrypoint.sh"]
