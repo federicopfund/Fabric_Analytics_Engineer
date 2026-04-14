@@ -14,9 +14,7 @@ ARG SPARK_VERSION=3.3.1
 ARG HADOOP_VERSION=3
 ARG DELTA_VERSION=2.2.0
 ARG SCALA_VERSION=2.12
-ARG AWS_SDK_VERSION=1.12.262
-ARG HADOOP_AWS_VERSION=3.3.4
-ARG DB2_DRIVER_VERSION=11.5.9.0
+ARG AWS_S3_SDK_VERSION=1.12.262
 
 WORKDIR /build
 
@@ -25,16 +23,27 @@ RUN curl -fsSL "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spa
     | tar -xz --strip-components=1 -C /build
 
 # Descargar JARs adicionales (Delta Lake, S3A, Db2)
+# Usamos módulos individuales de AWS SDK en vez del bundle (280MB→~30MB)
 RUN cd /build/jars && \
     curl -fsSLO "https://repo1.maven.org/maven2/io/delta/delta-core_${SCALA_VERSION}/${DELTA_VERSION}/delta-core_${SCALA_VERSION}-${DELTA_VERSION}.jar" && \
     curl -fsSLO "https://repo1.maven.org/maven2/io/delta/delta-storage/${DELTA_VERSION}/delta-storage-${DELTA_VERSION}.jar" && \
     curl -fsSLO "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/${HADOOP_AWS_VERSION}/hadoop-aws-${HADOOP_AWS_VERSION}.jar" && \
-    curl -fsSLO "https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/${AWS_SDK_VERSION}/aws-java-sdk-bundle-${AWS_SDK_VERSION}.jar" && \
+    curl -fsSLO "https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-s3/${AWS_S3_SDK_VERSION}/aws-java-sdk-s3-${AWS_S3_SDK_VERSION}.jar" && \
+    curl -fsSLO "https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-core/${AWS_S3_SDK_VERSION}/aws-java-sdk-core-${AWS_S3_SDK_VERSION}.jar" && \
+    curl -fsSLO "https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-dynamodb/${AWS_S3_SDK_VERSION}/aws-java-sdk-dynamodb-${AWS_S3_SDK_VERSION}.jar" && \
+    curl -fsSLO "https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-sts/${AWS_S3_SDK_VERSION}/aws-java-sdk-sts-${AWS_S3_SDK_VERSION}.jar" && \
+    curl -fsSLO "https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-kms/${AWS_S3_SDK_VERSION}/aws-java-sdk-kms-${AWS_S3_SDK_VERSION}.jar" && \
+    curl -fsSLO "https://repo1.maven.org/maven2/com/amazonaws/jmespath-java/1.12.262/jmespath-java-1.12.262.jar" && \
     curl -fsSLO "https://repo1.maven.org/maven2/com/ibm/db2/jcc/${DB2_DRIVER_VERSION}/jcc-${DB2_DRIVER_VERSION}.jar"
 
-# Limpiar JARs innecesarios
+# Limpiar JARs innecesarios (keep kubernetes-client for K8s mode)
+# Remove: mesos, yarn, MLlib (no ML needed), RocksDB (no streaming state),
+# Breeze (numeric lib for MLlib), scala-compiler (not needed at runtime),
+# Hive metastore (Delta uses its own catalog), spark-mllib
 RUN cd /build/jars && \
-    rm -f *kubernetes-client*.jar *mesos*.jar *yarn*.jar 2>/dev/null || true
+    rm -f *mesos*.jar *yarn*.jar 2>/dev/null || true && \
+    rm -f spark-mllib*.jar breeze*.jar spire*.jar rocksdbjni*.jar 2>/dev/null || true && \
+    rm -f scala-compiler*.jar hive-metastore*.jar 2>/dev/null || true
 
 
 # ── Stage 2: Runtime ──────────────────────────────────────────
@@ -77,7 +86,7 @@ ENV SPARK_HOME=/opt/spark \
     SPARK_NO_DAEMONIZE=true
 
 # Copiar entrypoint
-COPY docker/entrypoint.sh /opt/spark/entrypoint.sh
+COPY entrypoint.sh /opt/spark/entrypoint.sh
 RUN chmod +x /opt/spark/entrypoint.sh
 
 # Puerto Spark UI
