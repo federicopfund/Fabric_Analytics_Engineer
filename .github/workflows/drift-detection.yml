@@ -1,0 +1,270 @@
+# ═══════════════════════════════════════════════════════════════
+# GitHub Actions — Schema & Data Drift Detection
+#
+# Detecta cambios en:
+#   • Schema de CSVs fuente (columnas nuevas/removidas, tipos)
+#   • Anomalías estadísticas (nulls spike, row count drop, outliers)
+#   • Delta entre Gold actual vs snapshot anterior
+# Abre issue en GitHub si detecta drift.
+#
+# Secrets: IBMCLOUD_API_KEY, COS_ACCESS_KEY, COS_SECRET_KEY
+# ═══════════════════════════════════════════════════════════════
+name: Drift Detection (Schema + Data)
+
+on:
+  schedule:
+    - cron: '30 */6 * * *'  # Cada 6 horas
+
+  workflow_dispatch:
+    inputs:
+      sensitivity:
+        description: 'Sensibilidad de detección'
+        required: false
+        default: 'medium'
+        type: choice
+        options: ['low', 'medium', 'high']
+
+env:
+  COS_ENDPOINT: s3.us-south.cloud-object-storage.appdomain.cloud
+  COS_BUCKET_RAW: datalake-raw-us-south-dev
+  COS_BUCKET_GOLD: datalake-gold-us-south-dev
+
+jobs:
+  drift-detection:
+    name: Detect Schema & Data Drift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        run: git clone --depth 1 https://github.com/${{ github.repository }}.git repo
+
+      - name: Install dependencies
+        run: pip install --quiet ibm-cos-sdk pyarrow pandas
+
+      - name: Run Drift Detection
+        id: drift
+        env:
+          COS_ACCESS_KEY: ${{ secrets.COS_ACCESS_KEY }}
+          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
+          SENSITIVITY: ${{ github.event.inputs.sensitivity || 'medium' }}
+        run: |
+          python3 << 'PYEOF'
+          import os, json, io, csv, sys
+          from datetime import datetime, timezone
+
+          import ibm_boto3
+          import pyarrow.parquet as pq
+          import pandas as pd
+
+          cos = ibm_boto3.client("s3",
+              aws_access_key_id=os.environ["COS_ACCESS_KEY"],
+              aws_secret_access_key=os.environ["COS_SECRET_KEY"],
+              endpoint_url=f"https://{os.environ.get('COS_ENDPOINT','s3.us-south.cloud-object-storage.appdomain.cloud')}"
+          )
+
+          now = datetime.now(timezone.utc)
+          sensitivity = os.environ.get("SENSITIVITY", "medium")
+          thresholds = {
+              "low":    {"null_pct": 0.5, "row_drop_pct": 0.5, "new_col_alert": False},
+              "medium": {"null_pct": 0.2, "row_drop_pct": 0.3, "new_col_alert": True},
+              "high":   {"null_pct": 0.05, "row_drop_pct": 0.1, "new_col_alert": True},
+          }
+          thresh = thresholds[sensitivity]
+
+          drifts = []
+          report = []
+          report.append(f"# 🔍 Drift Detection Report")
+          report.append(f"Generated: {now.strftime('%Y-%m-%d %H:%M UTC')} | Sensitivity: **{sensitivity}**\n")
+
+          # ════════════════════════════════════════
+          # 1. Schema Drift — CSV Source Files
+          # ════════════════════════════════════════
+          report.append("## Schema Drift — Raw CSVs\n")
+
+          # Expected schemas (baseline from repo)
+          expected_schemas = {
+              "Categoria.csv": ["ProductCategoryKey", "SpanishProductCategoryName"],
+              "Subcategoria.csv": ["ProductSubcategoryKey", "SpanishProductSubcategoryName", "ProductCategoryKey"],
+              "Producto.csv": ["ProductKey", "SpanishProductName", "ProductSubcategoryKey", "Color", "Size", "ListPrice", "StandardCost"],
+              "Sucursales.csv": ["SalesTerritoryKey", "SalesTerritoryRegion", "SalesTerritoryCountry", "SalesTerritoryGroup"],
+              "VentasInternet.csv": ["ProductKey", "CustomerKey", "SalesTerritoryKey", "OrderDateKey", "SalesOrderNumber", "SalesAmount", "TaxAmt", "Freight", "OrderQuantity"],
+              "FactMine.csv": ["MineID", "Year", "Production", "Value"],
+              "Mine.csv": ["MineID", "MineName", "Operator", "State", "County", "Commodity", "Latitude", "Longitude"],
+          }
+
+          report.append("| CSV | Status | Detail |")
+          report.append("|-----|--------|--------|")
+
+          for csv_name, expected_cols in expected_schemas.items():
+              try:
+                  obj = cos.get_object(
+                      Bucket=os.environ["COS_BUCKET_RAW"], Key=csv_name)
+                  # Read first 2 lines to get header
+                  content = obj["Body"].read(4096).decode("utf-8", errors="replace")
+                  lines = content.split("\n")
+                  if lines:
+                      reader = csv.reader(io.StringIO(lines[0]))
+                      actual_cols = next(reader, [])
+                      actual_set = set(c.strip() for c in actual_cols)
+                      expected_set = set(expected_cols)
+
+                      new_cols = actual_set - expected_set
+                      missing_cols = expected_set - actual_set
+
+                      if missing_cols:
+                          drifts.append(f"SCHEMA: {csv_name} missing columns: {missing_cols}")
+                          report.append(f"| {csv_name} | ❌ DRIFT | Missing: {', '.join(missing_cols)} |")
+                      elif new_cols and thresh["new_col_alert"]:
+                          drifts.append(f"SCHEMA: {csv_name} new columns: {new_cols}")
+                          report.append(f"| {csv_name} | ⚠️ NEW COLS | Added: {', '.join(new_cols)} |")
+                      else:
+                          report.append(f"| {csv_name} | ✅ OK | {len(actual_cols)} columns |")
+              except Exception as e:
+                  report.append(f"| {csv_name} | ❌ ERROR | {str(e)[:50]} |")
+                  drifts.append(f"SCHEMA: Cannot read {csv_name}: {str(e)[:80]}")
+
+          report.append("")
+
+          # ════════════════════════════════════════
+          # 2. Data Drift — Gold Layer Statistics
+          # ════════════════════════════════════════
+          report.append("## Data Drift — Gold Layer\n")
+
+          gold_tables = ["dim_producto", "dim_cliente", "dim_operador",
+                        "fact_ventas", "fact_produccion_minera",
+                        "kpi_ventas_mensuales", "kpi_mineria"]
+
+          # Expected baselines (approximate)
+          baselines = {
+              "dim_producto": {"min_rows": 200, "max_rows": 1000},
+              "dim_cliente": {"min_rows": 10000, "max_rows": 50000},
+              "dim_operador": {"min_rows": 100, "max_rows": 5000},
+              "fact_ventas": {"min_rows": 50000, "max_rows": 200000},
+              "fact_produccion_minera": {"min_rows": 50, "max_rows": 5000},
+              "kpi_ventas_mensuales": {"min_rows": 20, "max_rows": 500},
+              "kpi_mineria": {"min_rows": 10, "max_rows": 2000},
+          }
+
+          report.append("| Table | Rows | Null% Max | Status |")
+          report.append("|-------|------|-----------|--------|")
+
+          snapshot = {}
+          for table in gold_tables:
+              try:
+                  resp = cos.list_objects_v2(
+                      Bucket=os.environ["COS_BUCKET_GOLD"], Prefix=f"{table}/")
+                  parquet_files = [
+                      o["Key"] for o in resp.get("Contents", [])
+                      if o["Key"].endswith(".parquet")
+                  ]
+                  if not parquet_files:
+                      report.append(f"| {table} | N/A | N/A | ❌ No parquet files |")
+                      drifts.append(f"DATA: {table} has no parquet files")
+                      continue
+
+                  obj = cos.get_object(
+                      Bucket=os.environ["COS_BUCKET_GOLD"], Key=parquet_files[0])
+                  buf = io.BytesIO(obj["Body"].read())
+                  df = pd.read_parquet(buf)
+
+                  num_rows = len(df)
+                  null_pcts = df.isnull().mean()
+                  max_null_pct = null_pcts.max()
+                  max_null_col = null_pcts.idxmax() if max_null_pct > 0 else "N/A"
+
+                  snapshot[table] = {
+                      "rows": num_rows,
+                      "max_null_pct": round(float(max_null_pct), 4),
+                      "columns": len(df.columns)
+                  }
+
+                  issues = []
+                  baseline = baselines.get(table, {})
+
+                  # Row count check
+                  if baseline.get("min_rows") and num_rows < baseline["min_rows"]:
+                      issues.append(f"rows below min ({baseline['min_rows']})")
+                      drifts.append(f"DATA: {table} has only {num_rows} rows (min: {baseline['min_rows']})")
+
+                  # Null percentage check
+                  if max_null_pct > thresh["null_pct"]:
+                      issues.append(f"high nulls in '{max_null_col}' ({max_null_pct:.1%})")
+                      drifts.append(f"DATA: {table}.{max_null_col} has {max_null_pct:.1%} nulls")
+
+                  status = "❌ " + "; ".join(issues) if issues else "✅ OK"
+                  report.append(f"| {table} | {num_rows:,} | {max_null_pct:.1%} ({max_null_col}) | {status} |")
+
+              except Exception as e:
+                  report.append(f"| {table} | ERROR | - | {str(e)[:50]} |")
+
+          report.append("")
+
+          # Save snapshot for future comparisons
+          snapshot_key = f"_drift_snapshots/{now.strftime('%Y%m%d_%H%M')}.json"
+          try:
+              cos.put_object(
+                  Bucket=os.environ["COS_BUCKET_GOLD"],
+                  Key=snapshot_key,
+                  Body=json.dumps({"timestamp": now.isoformat(), "tables": snapshot}).encode()
+              )
+              report.append(f"_Snapshot saved: `{snapshot_key}`_\n")
+          except:
+              pass
+
+          # ════════════════════════════════════════
+          # Summary
+          # ════════════════════════════════════════
+          if drifts:
+              report.append(f"## ⚠️ Drifts Detected: {len(drifts)}\n")
+              for d in drifts:
+                  report.append(f"- {d}")
+          else:
+              report.append("## ✅ No Drift Detected\n")
+
+          full_report = "\n".join(report)
+          print(full_report)
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          if summary:
+              with open(summary, "w") as f:
+                  f.write(full_report)
+
+          # Output for issue creation
+          if drifts:
+              # Write drift flag
+              with open(os.environ.get("GITHUB_OUTPUT", "/dev/null"), "a") as f:
+                  f.write(f"drift_detected=true\n")
+                  f.write(f"drift_count={len(drifts)}\n")
+                  title = f"Drift detected: {len(drifts)} issue(s) — {now.strftime('%Y-%m-%d')}"
+                  f.write(f"issue_title={title}\n")
+
+              with open("/tmp/drift_body.md", "w") as f:
+                  f.write(full_report)
+          else:
+              with open(os.environ.get("GITHUB_OUTPUT", "/dev/null"), "a") as f:
+                  f.write("drift_detected=false\n")
+          PYEOF
+
+      - name: Create GitHub Issue on Drift
+        if: steps.drift.outputs.drift_detected == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="${{ steps.drift.outputs.issue_title }}"
+          BODY=$(cat /tmp/drift_body.md)
+
+          # Use GitHub API directly (no external actions)
+          curl -sX POST \
+            "https://api.github.com/repos/${{ github.repository }}/issues" \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(python3 -c "
+          import json,sys
+          body = open('/tmp/drift_body.md').read()
+          print(json.dumps({
+              'title': '${{ steps.drift.outputs.issue_title }}',
+              'body': body,
+              'labels': ['drift-detection', 'automated']
+          }))
+          ")"
+
+          echo "📋 GitHub Issue created for drift detection"

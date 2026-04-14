@@ -1,0 +1,252 @@
+# ═══════════════════════════════════════════════════════════════
+# GitHub Actions — Data Lineage & Catalog Publisher
+#
+# Genera documentación automática del linaje de datos:
+#   • Mapeo completo raw → bronze → silver → gold → db2
+#   • Schema de cada tabla (columnas, tipos, nulls)
+#   • Métricas de volumen (row counts, sizes)
+#   • Publica como artifact descargable y en Step Summary
+#
+# Secrets: IBMCLOUD_API_KEY, COS_ACCESS_KEY, COS_SECRET_KEY, DB2_PASSWORD
+# ═══════════════════════════════════════════════════════════════
+name: Data Lineage & Catalog
+
+on:
+  schedule:
+    - cron: '0 7 * * 1'  # Lunes 07:00 UTC
+
+  workflow_dispatch:
+
+env:
+  COS_ENDPOINT: s3.us-south.cloud-object-storage.appdomain.cloud
+  DB2_HOSTNAME: 6667d8e9-9d4d-4ccb-ba32-21da3bb5aafc.c1ogj3sd0tgtu0lqde00.databases.appdomain.cloud
+  DB2_PORT: '30376'
+  DB2_DATABASE: bludb
+  DB2_USERNAME: qtn87286
+
+jobs:
+  catalog:
+    name: Generate Data Catalog
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        run: git clone --depth 1 https://github.com/${{ github.repository }}.git repo
+
+      - name: Install dependencies
+        run: pip install --quiet ibm-cos-sdk ibm-db pyarrow pandas
+
+      - name: Generate Lineage & Catalog
+        env:
+          COS_ACCESS_KEY: ${{ secrets.COS_ACCESS_KEY }}
+          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
+          DB2_PASSWORD: ${{ secrets.DB2_PASSWORD }}
+        run: |
+          mkdir -p catalog-output
+
+          python3 << 'PYEOF'
+          import os, json, io
+          from datetime import datetime, timezone
+
+          import ibm_boto3
+          import pyarrow.parquet as pq
+
+          cos = ibm_boto3.client("s3",
+              aws_access_key_id=os.environ["COS_ACCESS_KEY"],
+              aws_secret_access_key=os.environ["COS_SECRET_KEY"],
+              endpoint_url=f"https://{os.environ.get('COS_ENDPOINT','s3.us-south.cloud-object-storage.appdomain.cloud')}"
+          )
+
+          now = datetime.now(timezone.utc)
+
+          # ── Lineage Definition ──
+          lineage = {
+              "dim_producto": {
+                  "sources": ["Producto.csv", "Categoria.csv", "Subcategoria.csv"],
+                  "bronze": ["producto", "categoria", "subcategoria"],
+                  "silver": ["catalogo_productos"],
+                  "gold": ["dim_producto"],
+                  "db2": ["DIM_PRODUCTO"],
+                  "description": "Dimensión producto con categoría y subcategoría (join enriquecido)"
+              },
+              "dim_cliente": {
+                  "sources": ["VentasInternet.csv"],
+                  "bronze": ["ventas_internet"],
+                  "silver": ["clientes_unicos"],
+                  "gold": ["dim_cliente"],
+                  "db2": ["DIM_CLIENTE"],
+                  "description": "Dimensión cliente extraída de transacciones de venta"
+              },
+              "dim_operador": {
+                  "sources": ["Mine.csv"],
+                  "bronze": ["mine"],
+                  "silver": ["operadores_mineros"],
+                  "gold": ["dim_operador"],
+                  "db2": ["DIM_OPERADOR"],
+                  "description": "Dimensión operador minero con geolocalización"
+              },
+              "fact_ventas": {
+                  "sources": ["VentasInternet.csv", "Sucursales.csv"],
+                  "bronze": ["ventas_internet", "sucursales"],
+                  "silver": ["ventas_enriched"],
+                  "gold": ["fact_ventas"],
+                  "db2": ["FACT_VENTAS"],
+                  "description": "Tabla de hechos de ventas con métricas calculadas"
+              },
+              "fact_produccion_minera": {
+                  "sources": ["FactMine.csv", "Mine.csv"],
+                  "bronze": ["fact_mine", "mine"],
+                  "silver": ["produccion_minera_enriched"],
+                  "gold": ["fact_produccion_minera"],
+                  "db2": ["FACT_PRODUCCION_MINERA"],
+                  "description": "Tabla de hechos de producción minera"
+              },
+              "kpi_ventas_mensuales": {
+                  "sources": ["VentasInternet.csv"],
+                  "bronze": ["ventas_internet"],
+                  "silver": ["ventas_enriched"],
+                  "gold": ["kpi_ventas_mensuales"],
+                  "db2": ["KPI_VENTAS_MENSUALES"],
+                  "description": "KPIs de venta agregados por mes (revenue, AOV, qty)"
+              },
+              "kpi_mineria": {
+                  "sources": ["FactMine.csv", "Mine.csv"],
+                  "bronze": ["fact_mine", "mine"],
+                  "silver": ["produccion_minera_enriched"],
+                  "gold": ["kpi_mineria"],
+                  "db2": ["KPI_MINERIA"],
+                  "description": "KPIs de minería agregados por operador y período"
+              }
+          }
+
+          catalog = []
+          catalog.append(f"# 📚 Data Catalog & Lineage — Medallion Pipeline")
+          catalog.append(f"Generated: {now.strftime('%Y-%m-%d %H:%M UTC')}\n")
+
+          # ════════════════════════════════════════
+          # Lineage Diagram (Mermaid)
+          # ════════════════════════════════════════
+          catalog.append("## Data Lineage\n")
+          catalog.append("```mermaid")
+          catalog.append("graph LR")
+          catalog.append("    subgraph RAW[\"🗂 Raw CSVs\"]")
+          all_sources = set()
+          for v in lineage.values():
+              all_sources.update(v["sources"])
+          for s in sorted(all_sources):
+              safe = s.replace(".csv","").replace(" ","_")
+              catalog.append(f"        {safe}[\"{s}\"]")
+          catalog.append("    end")
+          catalog.append("    subgraph BRONZE[\"🥉 Bronze\"]")
+          all_bronze = set()
+          for v in lineage.values():
+              all_bronze.update(v["bronze"])
+          for b in sorted(all_bronze):
+              catalog.append(f"        b_{b}[\"{b}\"]")
+          catalog.append("    end")
+          catalog.append("    subgraph SILVER[\"🥈 Silver\"]")
+          all_silver = set()
+          for v in lineage.values():
+              all_silver.update(v["silver"])
+          for s in sorted(all_silver):
+              catalog.append(f"        s_{s}[\"{s}\"]")
+          catalog.append("    end")
+          catalog.append("    subgraph GOLD[\"🥇 Gold\"]")
+          for g in lineage:
+              catalog.append(f"        g_{g}[\"{g}\"]")
+          catalog.append("    end")
+          catalog.append("    subgraph DB2[\"🗄 Db2\"]")
+          for v in lineage.values():
+              for d in v["db2"]:
+                  catalog.append(f"        d_{d}[\"{d}\"]")
+          catalog.append("    end")
+
+          # Edges
+          for key, v in lineage.items():
+              for src in v["sources"]:
+                  safe_src = src.replace(".csv","").replace(" ","_")
+                  for b in v["bronze"]:
+                      catalog.append(f"    {safe_src} --> b_{b}")
+              for b in v["bronze"]:
+                  for s in v["silver"]:
+                      catalog.append(f"    b_{b} --> s_{s}")
+              for s in v["silver"]:
+                  catalog.append(f"    s_{s} --> g_{key}")
+              for d in v["db2"]:
+                  catalog.append(f"    g_{key} --> d_{d}")
+
+          catalog.append("```\n")
+
+          # ════════════════════════════════════════
+          # Table Catalog
+          # ════════════════════════════════════════
+          catalog.append("## Table Catalog\n")
+
+          buckets = {
+              "gold": "datalake-gold-us-south-dev",
+          }
+
+          for entity, meta in lineage.items():
+              catalog.append(f"### `{entity}`")
+              catalog.append(f"> {meta['description']}\n")
+              catalog.append(f"| Layer | Tables |")
+              catalog.append(f"|-------|--------|")
+              catalog.append(f"| Raw | {', '.join(meta['sources'])} |")
+              catalog.append(f"| Bronze | {', '.join(meta['bronze'])} |")
+              catalog.append(f"| Silver | {', '.join(meta['silver'])} |")
+              catalog.append(f"| Gold | {', '.join(meta['gold'])} |")
+              catalog.append(f"| Db2 | {', '.join(meta['db2'])} |")
+
+              # Try to read Parquet schema from Gold
+              try:
+                  prefix = f"{entity}/"
+                  resp = cos.list_objects_v2(
+                      Bucket=buckets["gold"], Prefix=prefix)
+                  parquet_files = [
+                      o["Key"] for o in resp.get("Contents",[])
+                      if o["Key"].endswith(".parquet")
+                  ]
+                  if parquet_files:
+                      obj = cos.get_object(
+                          Bucket=buckets["gold"], Key=parquet_files[0])
+                      buf = io.BytesIO(obj["Body"].read())
+                      pf = pq.ParquetFile(buf)
+                      schema = pf.schema_arrow
+
+                      catalog.append(f"\n**Schema** ({len(schema)} columns):\n")
+                      catalog.append("| Column | Type | Nullable |")
+                      catalog.append("|--------|------|----------|")
+                      for i in range(len(schema)):
+                          field = schema.field(i)
+                          catalog.append(
+                              f"| `{field.name}` | {field.type} | {field.nullable} |")
+
+                      num_rows = pf.metadata.num_rows
+                      catalog.append(f"\nRows: **{num_rows:,}**\n")
+              except Exception as e:
+                  catalog.append(f"\n_Schema unavailable: {str(e)[:60]}_\n")
+
+              catalog.append("")
+
+          # Write files
+          full = "\n".join(catalog)
+          print(full)
+
+          with open("catalog-output/DATA_CATALOG.md", "w") as f:
+              f.write(full)
+
+          # Lineage JSON for programmatic use
+          with open("catalog-output/lineage.json", "w") as f:
+              json.dump(lineage, f, indent=2)
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          if summary:
+              with open(summary, "w") as f:
+                  f.write(full)
+          PYEOF
+
+      - name: Upload catalog artifact
+        run: |
+          echo "Catalog files:"
+          ls -la catalog-output/
+          # Note: without actions/upload-artifact, we store in the summary
+          cat catalog-output/DATA_CATALOG.md

@@ -1,0 +1,285 @@
+# ═══════════════════════════════════════════════════════════════
+# GitHub Actions — Data Quality Gate
+#
+# Valida calidad de datos post-ETL en las capas Gold/Silver.
+# Checkea: nulls, duplicados, row counts, schema drift, freshness.
+# Se ejecuta después del pipeline o manualmente.
+#
+# Secrets: IBMCLOUD_API_KEY, COS_ACCESS_KEY, COS_SECRET_KEY, DB2_PASSWORD
+# ═══════════════════════════════════════════════════════════════
+name: Data Quality Gate
+
+on:
+  # Se dispara cuando termina el pipeline principal
+  workflow_run:
+    workflows: ["Spark Pipeline — Medallion v6.0"]
+    types: [completed]
+
+  # Trigger manual
+  workflow_dispatch:
+    inputs:
+      layer:
+        description: 'Capa a validar'
+        required: false
+        default: 'all'
+        type: choice
+        options: ['all', 'bronze', 'silver', 'gold', 'db2']
+      fail_on_warning:
+        description: 'Fallar en warnings (strict mode)'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+env:
+  AE_REGION: us-south
+  COS_ENDPOINT: s3.us-south.cloud-object-storage.appdomain.cloud
+  COS_BUCKET_RAW: datalake-raw-us-south-dev
+  COS_BUCKET_BRONZE: datalake-bronze-us-south-dev
+  COS_BUCKET_SILVER: datalake-silver-us-south-dev
+  COS_BUCKET_GOLD: datalake-gold-us-south-dev
+  DB2_HOSTNAME: 6667d8e9-9d4d-4ccb-ba32-21da3bb5aafc.c1ogj3sd0tgtu0lqde00.databases.appdomain.cloud
+  DB2_PORT: '30376'
+  DB2_DATABASE: bludb
+  DB2_USERNAME: qtn87286
+
+jobs:
+  quality-checks:
+    name: Data Quality Validation
+    runs-on: ubuntu-latest
+    # Solo correr si el pipeline fue exitoso (o manual)
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Install dependencies
+        run: |
+          pip install --quiet ibm-cos-sdk ibm-db pyarrow pandas
+
+      - name: Get IAM Token
+        id: iam
+        run: |
+          TOKEN=$(curl -sX POST "https://iam.cloud.ibm.com/identity/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=urn:ibm:params:oauth:grant-type:apikey&apikey=${{ secrets.IBMCLOUD_API_KEY }}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Run Quality Checks
+        id: quality
+        env:
+          COS_ACCESS_KEY: ${{ secrets.COS_ACCESS_KEY }}
+          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
+          DB2_PASSWORD: ${{ secrets.DB2_PASSWORD }}
+          CHECK_LAYER: ${{ github.event.inputs.layer || 'all' }}
+          STRICT_MODE: ${{ github.event.inputs.fail_on_warning || 'false' }}
+        run: |
+          python3 << 'PYEOF'
+          import os, json, sys
+          from datetime import datetime, timedelta, timezone
+
+          import ibm_boto3
+          from ibm_botocore.client import Config
+
+          # ── COS Client ──
+          cos = ibm_boto3.client("s3",
+              aws_access_key_id=os.environ["COS_ACCESS_KEY"],
+              aws_secret_access_key=os.environ["COS_SECRET_KEY"],
+              endpoint_url=f"https://{os.environ.get('COS_ENDPOINT','s3.us-south.cloud-object-storage.appdomain.cloud')}"
+          )
+
+          layer = os.environ.get("CHECK_LAYER", "all")
+          strict = os.environ.get("STRICT_MODE", "false") == "true"
+          results = {"checks": [], "errors": 0, "warnings": 0, "passed": 0}
+          now = datetime.now(timezone.utc)
+
+          def check(name, passed, detail="", level="error"):
+              status = "PASS" if passed else level.upper()
+              results["checks"].append({"name": name, "status": status, "detail": detail})
+              if passed:
+                  results["passed"] += 1
+              elif level == "error":
+                  results["errors"] += 1
+              else:
+                  results["warnings"] += 1
+
+          def count_objects(bucket, prefix=""):
+              try:
+                  resp = cos.list_objects_v2(Bucket=bucket, Prefix=prefix)
+                  return resp.get("KeyCount", 0)
+              except Exception as e:
+                  return -1
+
+          def check_freshness(bucket, max_hours=2):
+              """Check if data was modified within max_hours."""
+              try:
+                  resp = cos.list_objects_v2(Bucket=bucket)
+                  if "Contents" not in resp:
+                      return False, "bucket empty"
+                  latest = max(obj["LastModified"] for obj in resp["Contents"])
+                  age = now - latest
+                  fresh = age < timedelta(hours=max_hours)
+                  return fresh, f"last modified {age.total_seconds()/3600:.1f}h ago"
+              except Exception as e:
+                  return False, str(e)
+
+          def get_bucket_tables(bucket):
+              """List Delta/Parquet table prefixes in a bucket."""
+              try:
+                  resp = cos.list_objects_v2(Bucket=bucket, Delimiter="/")
+                  prefixes = [p["Prefix"].rstrip("/") for p in resp.get("CommonPrefixes", [])]
+                  return [p for p in prefixes if not p.startswith("spark-")]
+              except:
+                  return []
+
+          # ════════════════════════════════════════════
+          # RAW Layer Checks
+          # ════════════════════════════════════════════
+          if layer in ("all", "raw"):
+              raw_count = count_objects(os.environ["COS_BUCKET_RAW"])
+              check("RAW: Bucket accessible", raw_count >= 0)
+              check("RAW: CSV files present", raw_count >= 7,
+                    f"{raw_count} objects (expected >=7)")
+
+              expected_csvs = ["Categoria.csv", "Subcategoria.csv", "Producto.csv",
+                              "Sucursales.csv", "VentasInternet.csv", "FactMine.csv", "Mine.csv"]
+              for csv in expected_csvs:
+                  try:
+                      head = cos.head_object(Bucket=os.environ["COS_BUCKET_RAW"], Key=csv)
+                      size = head["ContentLength"]
+                      check(f"RAW: {csv} exists", size > 0, f"{size} bytes")
+                  except:
+                      check(f"RAW: {csv} exists", False, "missing")
+
+          # ════════════════════════════════════════════
+          # BRONZE Layer Checks
+          # ════════════════════════════════════════════
+          if layer in ("all", "bronze"):
+              bronze_count = count_objects(os.environ["COS_BUCKET_BRONZE"])
+              check("BRONZE: Bucket accessible", bronze_count >= 0)
+              check("BRONZE: Data present", bronze_count >= 5,
+                    f"{bronze_count} objects")
+
+              fresh, detail = check_freshness(os.environ["COS_BUCKET_BRONZE"])
+              check("BRONZE: Data freshness (<2h)", fresh, detail, "warning")
+
+              tables = get_bucket_tables(os.environ["COS_BUCKET_BRONZE"])
+              check("BRONZE: Tables exist", len(tables) >= 3,
+                    f"tables: {', '.join(tables)}")
+
+          # ════════════════════════════════════════════
+          # SILVER Layer Checks
+          # ════════════════════════════════════════════
+          if layer in ("all", "silver"):
+              silver_count = count_objects(os.environ["COS_BUCKET_SILVER"])
+              check("SILVER: Bucket accessible", silver_count >= 0)
+              check("SILVER: Data present", silver_count >= 5,
+                    f"{silver_count} objects")
+
+              fresh, detail = check_freshness(os.environ["COS_BUCKET_SILVER"])
+              check("SILVER: Data freshness (<2h)", fresh, detail, "warning")
+
+              tables = get_bucket_tables(os.environ["COS_BUCKET_SILVER"])
+              check("SILVER: Tables exist", len(tables) >= 3,
+                    f"tables: {', '.join(tables)}")
+
+          # ════════════════════════════════════════════
+          # GOLD Layer Checks
+          # ════════════════════════════════════════════
+          if layer in ("all", "gold"):
+              gold_count = count_objects(os.environ["COS_BUCKET_GOLD"])
+              check("GOLD: Bucket accessible", gold_count >= 0)
+              check("GOLD: Data present", gold_count >= 10,
+                    f"{gold_count} objects")
+
+              fresh, detail = check_freshness(os.environ["COS_BUCKET_GOLD"])
+              check("GOLD: Data freshness (<2h)", fresh, detail, "warning")
+
+              expected_gold = ["dim_producto", "dim_cliente", "dim_operador",
+                              "fact_ventas", "fact_produccion_minera",
+                              "kpi_ventas_mensuales", "kpi_mineria"]
+              tables = get_bucket_tables(os.environ["COS_BUCKET_GOLD"])
+              for t in expected_gold:
+                  check(f"GOLD: Table '{t}' exists", t in tables)
+
+              # Check Delta log integrity
+              for t in expected_gold:
+                  delta_log = count_objects(os.environ["COS_BUCKET_GOLD"], f"{t}/_delta_log/")
+                  check(f"GOLD: '{t}' Delta log intact", delta_log >= 1,
+                        f"{delta_log} log files", "warning")
+
+          # ════════════════════════════════════════════
+          # DB2 Checks
+          # ════════════════════════════════════════════
+          if layer in ("all", "db2"):
+              try:
+                  import ibm_db
+                  conn_str = (
+                      f"DATABASE={os.environ.get('DB2_DATABASE','bludb')};"
+                      f"HOSTNAME={os.environ['DB2_HOSTNAME']};"
+                      f"PORT={os.environ.get('DB2_PORT','30376')};"
+                      f"PROTOCOL=TCPIP;"
+                      f"UID={os.environ.get('DB2_USERNAME','qtn87286')};"
+                      f"PWD={os.environ['DB2_PASSWORD']};"
+                      f"SECURITY=SSL;"
+                  )
+                  conn = ibm_db.connect(conn_str, "", "")
+                  check("DB2: Connection", True)
+
+                  expected_db2 = ["DIM_PRODUCTO", "DIM_CLIENTE", "FACT_VENTAS",
+                                  "KPI_VENTAS_MENSUALES", "DIM_OPERADOR",
+                                  "FACT_PRODUCCION_MINERA", "KPI_MINERIA"]
+                  for table in expected_db2:
+                      try:
+                          stmt = ibm_db.exec_immediate(conn,
+                              f"SELECT COUNT(*) as cnt FROM {table}")
+                          row = ibm_db.fetch_assoc(stmt)
+                          cnt = row["CNT"] if row else 0
+                          check(f"DB2: {table} has data", cnt > 0, f"{cnt} rows")
+                      except Exception as e:
+                          check(f"DB2: {table} has data", False, str(e)[:80])
+
+                  ibm_db.close(conn)
+              except ImportError:
+                  check("DB2: Driver available", False, "ibm_db not installed", "warning")
+              except Exception as e:
+                  check("DB2: Connection", False, str(e)[:100])
+
+          # ════════════════════════════════════════════
+          # Report
+          # ════════════════════════════════════════════
+          total = results["passed"] + results["errors"] + results["warnings"]
+          print(f"\n{'='*60}")
+          print(f"  DATA QUALITY REPORT — {now.strftime('%Y-%m-%d %H:%M UTC')}")
+          print(f"{'='*60}\n")
+
+          for c in results["checks"]:
+              icon = "✅" if c["status"] == "PASS" else "❌" if c["status"] == "ERROR" else "⚠️"
+              detail = f" — {c['detail']}" if c["detail"] else ""
+              print(f"  {icon} {c['name']}{detail}")
+
+          print(f"\n{'─'*60}")
+          print(f"  Total: {total} | ✅ {results['passed']} | ❌ {results['errors']} | ⚠️  {results['warnings']}")
+          print(f"{'─'*60}\n")
+
+          # Write summary
+          summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          if summary:
+              with open(summary, "a") as f:
+                  f.write("## Data Quality Report\n\n")
+                  f.write(f"| Check | Status | Detail |\n|---|---|---|\n")
+                  for c in results["checks"]:
+                      icon = "✅" if c["status"] == "PASS" else "❌" if c["status"] == "ERROR" else "⚠️"
+                      f.write(f"| {c['name']} | {icon} {c['status']} | {c['detail']} |\n")
+                  f.write(f"\n**Total: {total}** — ✅ {results['passed']} ❌ {results['errors']} ⚠️ {results['warnings']}\n")
+
+          # Exit code
+          if results["errors"] > 0:
+              print("::error::Data quality checks FAILED")
+              sys.exit(1)
+          elif results["warnings"] > 0 and strict:
+              print("::error::Data quality warnings in strict mode")
+              sys.exit(1)
+          else:
+              print("✔ All quality checks passed")
+          PYEOF

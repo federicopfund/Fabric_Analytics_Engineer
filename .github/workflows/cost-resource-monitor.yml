@@ -1,0 +1,223 @@
+# ═══════════════════════════════════════════════════════════════
+# GitHub Actions — Cost & Resource Monitor
+#
+# Monitorea semanal:
+#   • Tamaño de buckets COS (raw, bronze, silver, gold)
+#   • Apps ejecutadas en AE (count, duración, estado)
+#   • Row counts en Db2
+#   • Genera reporte con alertas de threshold
+#
+# Secrets: IBMCLOUD_API_KEY, COS_ACCESS_KEY, COS_SECRET_KEY, DB2_PASSWORD
+# ═══════════════════════════════════════════════════════════════
+name: Cost & Resource Monitor
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'  # Lunes 08:00 UTC
+
+  workflow_dispatch:
+
+env:
+  AE_INSTANCE_ID: a688f3c4-efa9-4f12-842c-6a8d73a7ed2e
+  AE_REGION: us-south
+  COS_ENDPOINT: s3.us-south.cloud-object-storage.appdomain.cloud
+  DB2_HOSTNAME: 6667d8e9-9d4d-4ccb-ba32-21da3bb5aafc.c1ogj3sd0tgtu0lqde00.databases.appdomain.cloud
+  DB2_PORT: '30376'
+  DB2_DATABASE: bludb
+  DB2_USERNAME: qtn87286
+
+jobs:
+  monitor:
+    name: Resource Report
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: pip install --quiet ibm-cos-sdk ibm-db
+
+      - name: Generate Resource Report
+        env:
+          COS_ACCESS_KEY: ${{ secrets.COS_ACCESS_KEY }}
+          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
+          DB2_PASSWORD: ${{ secrets.DB2_PASSWORD }}
+          IBMCLOUD_API_KEY: ${{ secrets.IBMCLOUD_API_KEY }}
+        run: |
+          python3 << 'PYEOF'
+          import os, json, sys
+          from datetime import datetime, timezone
+
+          import ibm_boto3
+
+          cos = ibm_boto3.client("s3",
+              aws_access_key_id=os.environ["COS_ACCESS_KEY"],
+              aws_secret_access_key=os.environ["COS_SECRET_KEY"],
+              endpoint_url=f"https://{os.environ.get('COS_ENDPOINT','s3.us-south.cloud-object-storage.appdomain.cloud')}"
+          )
+
+          now = datetime.now(timezone.utc)
+          report = []
+          alerts = []
+
+          # ── Thresholds ──
+          MAX_BUCKET_SIZE_GB = 10
+          MAX_AE_APPS_WEEK = 200
+          MIN_DB2_ROWS = 10
+
+          report.append(f"# 📊 Resource Monitor Report — {now.strftime('%Y-%m-%d %H:%M UTC')}\n")
+
+          # ════════════════════════════════════════
+          # COS Bucket Sizes
+          # ════════════════════════════════════════
+          report.append("## COS Storage\n")
+          report.append("| Bucket | Objects | Size | Last Modified |")
+          report.append("|--------|---------|------|---------------|")
+
+          buckets = {
+              "raw": "datalake-raw-us-south-dev",
+              "bronze": "datalake-bronze-us-south-dev",
+              "silver": "datalake-silver-us-south-dev",
+              "gold": "datalake-gold-us-south-dev",
+          }
+
+          total_size = 0
+          for layer, bucket in buckets.items():
+              try:
+                  paginator = cos.get_paginator("list_objects_v2")
+                  obj_count = 0
+                  size_bytes = 0
+                  latest = None
+                  for page in paginator.paginate(Bucket=bucket):
+                      for obj in page.get("Contents", []):
+                          obj_count += 1
+                          size_bytes += obj["Size"]
+                          if latest is None or obj["LastModified"] > latest:
+                              latest = obj["LastModified"]
+
+                  size_mb = size_bytes / (1024*1024)
+                  size_gb = size_bytes / (1024*1024*1024)
+                  total_size += size_bytes
+                  last_mod = latest.strftime("%Y-%m-%d %H:%M") if latest else "N/A"
+                  report.append(f"| {layer} | {obj_count} | {size_mb:.1f} MB | {last_mod} |")
+
+                  if size_gb > MAX_BUCKET_SIZE_GB:
+                      alerts.append(f"🔴 Bucket '{layer}' exceeds {MAX_BUCKET_SIZE_GB}GB ({size_gb:.1f}GB)")
+              except Exception as e:
+                  report.append(f"| {layer} | ERROR | - | {str(e)[:40]} |")
+
+          total_gb = total_size / (1024*1024*1024)
+          report.append(f"\n**Total: {total_gb:.2f} GB**\n")
+
+          # ════════════════════════════════════════
+          # AE Spark Applications (last 7 days)
+          # ════════════════════════════════════════
+          report.append("## Analytics Engine Apps (Last 7 Days)\n")
+
+          try:
+              import urllib.request
+              # Get IAM token
+              token_data = urllib.parse.urlencode({
+                  "grant_type": "urn:ibm:params:oauth:grant-type:apikey",
+                  "apikey": os.environ["IBMCLOUD_API_KEY"]
+              }).encode()
+              req = urllib.request.Request("https://iam.cloud.ibm.com/identity/token",
+                  data=token_data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+              with urllib.request.urlopen(req) as resp:
+                  token = json.loads(resp.read())["access_token"]
+
+              ae_url = f"https://api.us-south.ae.cloud.ibm.com/v3/analytics_engines/{os.environ['AE_INSTANCE_ID']}/spark_applications"
+              req = urllib.request.Request(ae_url, headers={"Authorization": f"Bearer {token}"})
+              with urllib.request.urlopen(req) as resp:
+                  apps_data = json.loads(resp.read())
+
+              apps = apps_data.get("applications", [])
+              states = {}
+              durations = []
+              for app in apps:
+                  s = app.get("state", "unknown")
+                  states[s] = states.get(s, 0) + 1
+                  if app.get("start_time") and app.get("end_time"):
+                      from datetime import datetime as dt
+                      try:
+                          start = dt.fromisoformat(app["start_time"].replace("Z","+00:00"))
+                          end = dt.fromisoformat(app["end_time"].replace("Z","+00:00"))
+                          durations.append((end-start).total_seconds()/60)
+                      except:
+                          pass
+
+              report.append("| Metric | Value |")
+              report.append("|--------|-------|")
+              report.append(f"| Total apps | {len(apps)} |")
+              for state, count in sorted(states.items()):
+                  report.append(f"| {state} | {count} |")
+              if durations:
+                  avg_dur = sum(durations)/len(durations)
+                  report.append(f"| Avg duration | {avg_dur:.1f} min |")
+                  report.append(f"| Max duration | {max(durations):.1f} min |")
+
+              if len(apps) > MAX_AE_APPS_WEEK:
+                  alerts.append(f"🟡 {len(apps)} apps this week (threshold: {MAX_AE_APPS_WEEK})")
+
+              report.append("")
+          except Exception as e:
+              report.append(f"⚠️ Could not fetch AE data: {str(e)[:80]}\n")
+
+          # ════════════════════════════════════════
+          # Db2 Row Counts
+          # ════════════════════════════════════════
+          report.append("## Db2 Tables\n")
+          report.append("| Table | Rows |")
+          report.append("|-------|------|")
+
+          try:
+              import ibm_db
+              conn_str = (
+                  f"DATABASE={os.environ.get('DB2_DATABASE','bludb')};"
+                  f"HOSTNAME={os.environ['DB2_HOSTNAME']};"
+                  f"PORT={os.environ.get('DB2_PORT','30376')};"
+                  f"PROTOCOL=TCPIP;"
+                  f"UID={os.environ.get('DB2_USERNAME','qtn87286')};"
+                  f"PWD={os.environ['DB2_PASSWORD']};"
+                  f"SECURITY=SSL;"
+              )
+              conn = ibm_db.connect(conn_str, "", "")
+              tables = ["DIM_PRODUCTO","DIM_CLIENTE","DIM_OPERADOR",
+                        "FACT_VENTAS","FACT_PRODUCCION_MINERA",
+                        "KPI_VENTAS_MENSUALES","KPI_MINERIA"]
+              for t in tables:
+                  try:
+                      stmt = ibm_db.exec_immediate(conn, f"SELECT COUNT(*) AS CNT FROM {t}")
+                      row = ibm_db.fetch_assoc(stmt)
+                      cnt = row["CNT"] if row else 0
+                      report.append(f"| {t} | {cnt:,} |")
+                      if cnt < MIN_DB2_ROWS:
+                          alerts.append(f"🟡 {t} has only {cnt} rows")
+                  except:
+                      report.append(f"| {t} | N/A |")
+              ibm_db.close(conn)
+          except Exception as e:
+              report.append(f"| Connection failed | {str(e)[:50]} |")
+
+          report.append("")
+
+          # ════════════════════════════════════════
+          # Alerts
+          # ════════════════════════════════════════
+          if alerts:
+              report.append("## ⚠️ Alerts\n")
+              for a in alerts:
+                  report.append(f"- {a}")
+          else:
+              report.append("## ✅ No Alerts\n")
+              report.append("All resources within normal thresholds.")
+
+          # Output
+          full_report = "\n".join(report)
+          print(full_report)
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          if summary:
+              with open(summary, "w") as f:
+                  f.write(full_report)
+
+          if any("🔴" in a for a in alerts):
+              sys.exit(1)
+          PYEOF

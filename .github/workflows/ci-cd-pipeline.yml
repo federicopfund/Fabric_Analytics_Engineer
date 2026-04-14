@@ -1,0 +1,203 @@
+# ═══════════════════════════════════════════════════════════════
+# GitHub Actions — CI/CD Pipeline (Build + Test + Deploy)
+#
+# En cada push a main o PR:
+#   1. Compila el JAR Scala
+#   2. Ejecuta tests unitarios
+#   3. Sube JAR a COS
+#   4. Deploy a AE (solo en push a main)
+#
+# Secrets: IBMCLOUD_API_KEY, COS_ACCESS_KEY, COS_SECRET_KEY, DB2_PASSWORD
+# ═══════════════════════════════════════════════════════════════
+name: CI/CD — Build, Test & Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'transformation/spark-jobs/pipelines/batch-etl-scala/**'
+      - '.github/workflows/ci-cd-pipeline.yml'
+
+  pull_request:
+    branches: [main]
+    paths:
+      - 'transformation/spark-jobs/pipelines/batch-etl-scala/**'
+
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: 'Deploy to AE after build'
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
+
+env:
+  AE_INSTANCE_ID: a688f3c4-efa9-4f12-842c-6a8d73a7ed2e
+  AE_REGION: us-south
+  COS_ENDPOINT: s3.us-south.cloud-object-storage.appdomain.cloud
+  COS_BUCKET_RAW: datalake-raw-us-south-dev
+  JAR_COS_KEY: spark-jars/root-assembly-2.0.0.jar
+  SCALA_DIR: transformation/spark-jobs/pipelines/batch-etl-scala
+  DB2_HOSTNAME: 6667d8e9-9d4d-4ccb-ba32-21da3bb5aafc.c1ogj3sd0tgtu0lqde00.databases.appdomain.cloud
+  DB2_PORT: '30376'
+  DB2_DATABASE: bludb
+  DB2_USERNAME: qtn87286
+  DB2_SSL: 'true'
+
+jobs:
+  # ════════════════════════════════════════════════════════════
+  # Job 1: Build & Test
+  # ════════════════════════════════════════════════════════════
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        run: git clone --depth 1 https://github.com/${{ github.repository }}.git repo
+
+      - name: Setup JDK 11
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openjdk-11-jdk > /dev/null 2>&1
+          echo "JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64" >> "$GITHUB_ENV"
+
+      - name: Cache sbt
+        run: |
+          mkdir -p ~/.sbt ~/.ivy2 ~/.cache/coursier
+          echo "SBT caches initialized"
+
+      - name: Compile
+        working-directory: repo/${{ env.SCALA_DIR }}
+        run: |
+          sbt compile 2>&1 | tail -20
+          echo "compile_status=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Run Tests
+        id: test
+        working-directory: repo/${{ env.SCALA_DIR }}
+        run: |
+          sbt test 2>&1 | tee test-output.log | tail -30
+          TEST_EXIT=${PIPESTATUS[0]}
+          echo "test_exit=$TEST_EXIT" >> "$GITHUB_OUTPUT"
+
+          # Parse test results for summary
+          PASSED=$(grep -c "\[info\].*passed" test-output.log 2>/dev/null || echo "0")
+          FAILED=$(grep -c "\[error\].*failed" test-output.log 2>/dev/null || echo "0")
+
+          echo "### Test Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Metric | Count |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Passed | $PASSED |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Failed | $FAILED |" >> "$GITHUB_STEP_SUMMARY"
+
+          exit $TEST_EXIT
+
+      - name: Build Fat JAR
+        working-directory: repo/${{ env.SCALA_DIR }}
+        run: |
+          sbt assembly 2>&1 | tail -10
+          JAR_PATH="target/scala-2.12/root-assembly-2.0.0.jar"
+          if [ ! -f "$JAR_PATH" ]; then
+            echo "::error::JAR not found: $JAR_PATH"
+            exit 1
+          fi
+          JAR_SIZE=$(du -h "$JAR_PATH" | awk '{print $1}')
+          JAR_SHA=$(sha256sum "$JAR_PATH" | awk '{print $1}')
+          echo "jar_size=$JAR_SIZE" >> "$GITHUB_OUTPUT"
+          echo "jar_sha=$JAR_SHA" >> "$GITHUB_OUTPUT"
+
+          echo "### Build Artifact" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| JAR | root-assembly-2.0.0.jar |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Size | $JAR_SIZE |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SHA256 | \`${JAR_SHA:0:16}...\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload JAR to COS
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          curl -fsSL https://clis.cloud.ibm.com/install/linux | sh > /dev/null 2>&1
+          ibmcloud plugin install cloud-object-storage -f > /dev/null 2>&1
+          ibmcloud login --apikey "${{ secrets.IBMCLOUD_API_KEY }}" -r "${{ env.AE_REGION }}" --quiet
+
+          ibmcloud cos put-object \
+            --bucket "${{ env.COS_BUCKET_RAW }}" \
+            --key "${{ env.JAR_COS_KEY }}" \
+            --body "repo/${{ env.SCALA_DIR }}/target/scala-2.12/root-assembly-2.0.0.jar" \
+            --region "${{ env.AE_REGION }}"
+
+          echo "✔ JAR uploaded to COS"
+
+  # ════════════════════════════════════════════════════════════
+  # Job 2: Deploy to AE (only on main push)
+  # ════════════════════════════════════════════════════════════
+  deploy:
+    name: Deploy to AE
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && (github.event.inputs.deploy != 'false') }}
+    steps:
+      - name: Get IAM Token
+        id: iam
+        run: |
+          TOKEN=$(curl -sX POST "https://iam.cloud.ibm.com/identity/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=urn:ibm:params:oauth:grant-type:apikey&apikey=${{ secrets.IBMCLOUD_API_KEY }}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Submit Spark App
+        id: submit
+        run: |
+          APP_NAME="CI-Deploy-$(date +%Y%m%d-%H%M%S)"
+
+          PAYLOAD=$(python3 -c "
+          import json
+          print(json.dumps({'application_details': {
+              'application': 's3a://${{ env.COS_BUCKET_RAW }}/${{ env.JAR_COS_KEY }}',
+              'class': 'medallion.Pipeline',
+              'name': '${APP_NAME}',
+              'conf': {
+                  'spark.app.name': 'BatchETL-CI-Deploy',
+                  'spark.hadoop.fs.s3a.access.key': '${{ secrets.COS_ACCESS_KEY }}',
+                  'spark.hadoop.fs.s3a.secret.key': '${{ secrets.COS_SECRET_KEY }}',
+                  'spark.hadoop.fs.s3a.endpoint': 'https://${{ env.COS_ENDPOINT }}',
+                  'spark.hadoop.fs.s3a.impl': 'org.apache.hadoop.fs.s3a.S3AFileSystem',
+                  'spark.hadoop.fs.s3a.path.style.access': 'true',
+                  'spark.hadoop.fs.s3a.connection.ssl.enabled': 'true',
+                  'spark.sql.extensions': 'io.delta.sql.DeltaSparkSessionExtension',
+                  'spark.sql.catalog.spark_catalog': 'org.apache.spark.sql.delta.catalog.DeltaCatalog'
+              },
+              'env': {
+                  'EXECUTION_MODE': 'IBM_AE',
+                  'AE_INSTANCE_ID': '${{ env.AE_INSTANCE_ID }}',
+                  'COS_ACCESS_KEY': '${{ secrets.COS_ACCESS_KEY }}',
+                  'COS_SECRET_KEY': '${{ secrets.COS_SECRET_KEY }}',
+                  'COS_ENDPOINT': '${{ env.COS_ENDPOINT }}',
+                  'DB2_HOSTNAME': '${{ env.DB2_HOSTNAME }}',
+                  'DB2_PORT': '${{ env.DB2_PORT }}',
+                  'DB2_DATABASE': '${{ env.DB2_DATABASE }}',
+                  'DB2_USERNAME': '${{ env.DB2_USERNAME }}',
+                  'DB2_PASSWORD': '${{ secrets.DB2_PASSWORD }}',
+                  'DB2_SSL': '${{ env.DB2_SSL }}'
+              },
+              'runtime': {'spark_version': '3.5'}
+          }}))
+          ")
+
+          RESPONSE=$(curl -sX POST \
+            "https://api.${{ env.AE_REGION }}.ae.cloud.ibm.com/v3/analytics_engines/${{ env.AE_INSTANCE_ID }}/spark_applications" \
+            -H "Authorization: Bearer ${{ steps.iam.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+
+          APP_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
+
+          if [ -z "$APP_ID" ]; then
+            echo "::error::Deploy failed: $RESPONSE"
+            exit 1
+          fi
+          echo "### Deployed ✔" >> "$GITHUB_STEP_SUMMARY"
+          echo "App ID: \`$APP_ID\`" >> "$GITHUB_STEP_SUMMARY"
