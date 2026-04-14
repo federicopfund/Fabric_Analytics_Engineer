@@ -1,0 +1,33 @@
+# ═══════════════════════════════════════════════════════════════
+# Service — Spark Driver UI (monitoring access)
+# ═══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-driver-ui
+  namespace: spark-medallion
+  labels:
+    app.kubernetes.io/name: spark-medallion-etl
+    app.kubernetes.io/component: ui
+    app.kubernetes.io/part-of: medallion-pipeline
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "4040"
+spec:
+  selector:
+    spark-role: driver
+    app.kubernetes.io/name: spark-medallion-etl
+  type: ClusterIP
+  ports:
+    - name: spark-ui
+      port: 4040
+      targetPort: 4040
+      protocol: TCP
+    - name: driver-rpc
+      port: 7078
+      targetPort: 7078
+      protocol: TCP
+    - name: block-manager
+      port: 7079
+      targetPort: 7079
+      protocol: TCP
