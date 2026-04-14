@@ -136,6 +136,11 @@ spec:
                     secretKeyRef:
                       name: db2-credentials
                       key: port
+                - name: IBMCLOUD_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: ibmcloud-api
+                      key: api-key
               volumeMounts:
                 - name: spark-work
                   mountPath: /opt/spark/work
