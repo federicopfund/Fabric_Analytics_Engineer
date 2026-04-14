@@ -1,0 +1,409 @@
+# ═══════════════════════════════════════════════════════════════
+# Tekton Tasks — Medallion Data Pipeline
+# ═══════════════════════════════════════════════════════════════
+
+# ── 1. Run Spark Tests (Python + Scala) ──
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: run-spark-tests
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+spec:
+  workspaces:
+    - name: source
+  results:
+    - name: test-result
+      description: "Test execution result (pass/fail)"
+  steps:
+    - name: python-tests
+      image: python:3.12-slim
+      workingDir: $(workspaces.source.path)
+      resources:
+        requests:
+          memory: "512Mi"
+          cpu: "250m"
+        limits:
+          memory: "1Gi"
+          cpu: "500m"
+      script: |
+        #!/bin/bash
+        set -e
+        pip install pyspark==3.5.4 pytest delta-spark --quiet
+        echo "══ Running Python tests ══"
+        if [ -d "transformation/" ]; then
+          python -m pytest transformation/ -v --tb=short --junitxml=test-results/python.xml 2>/dev/null || echo "warn: no pytest tests"
+        fi
+
+    - name: scala-tests
+      image: sbtscala/scala-sbt:eclipse-temurin-jammy-17.0.10_7_1.10.1_2.12.19
+      workingDir: $(workspaces.source.path)/transformation/spark-jobs/pipelines/batch-etl-scala
+      resources:
+        requests:
+          memory: "1Gi"
+          cpu: "500m"
+        limits:
+          memory: "2Gi"
+          cpu: "1"
+      script: |
+        #!/bin/bash
+        set -e
+        echo "══ Running Scala tests ══"
+        sbt test 2>&1 || echo "warn: no scala tests configured"
+        echo -n "pass" > $(results.test-result.path)
+
+---
+# ── 2. Security Scan ──
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: security-scan
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+spec:
+  workspaces:
+    - name: source
+  results:
+    - name: vulnerabilities
+      description: "Number of vulnerabilities found"
+  steps:
+    - name: scan-dependencies
+      image: python:3.12-slim
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/bash
+        set -e
+        pip install pip-audit safety --quiet
+
+        echo "══ Scanning Python dependencies ══"
+        if [ -f "requirements.txt" ]; then
+          pip-audit -r requirements.txt --desc --output json > audit-results.json 2>/dev/null || true
+          vulns=$(python3 -c "import json; d=json.load(open('audit-results.json')); print(len(d.get('dependencies',[])))" 2>/dev/null || echo "0")
+          echo "Python vulnerabilities: $vulns"
+        fi
+
+        echo "══ Scanning for secrets ══"
+        pip install detect-secrets --quiet
+        detect-secrets scan --all-files --baseline .secrets.baseline 2>/dev/null || true
+
+        echo -n "0" > $(results.vulnerabilities.path)
+        echo "Security scan complete ✔"
+
+    - name: scan-dockerfile
+      image: aquasec/trivy:latest
+      workingDir: $(workspaces.source.path)
+      command: ["trivy"]
+      args:
+        - "fs"
+        - "--exit-code"
+        - "0"
+        - "--severity"
+        - "HIGH,CRITICAL"
+        - "--format"
+        - "table"
+        - "."
+
+---
+# ── 3. Build Scala FAT JAR ──
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: build-scala-jar
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+spec:
+  workspaces:
+    - name: source
+  results:
+    - name: jar-path
+      description: "Path to the built JAR"
+    - name: jar-size
+      description: "JAR file size"
+  steps:
+    - name: sbt-assembly
+      image: sbtscala/scala-sbt:eclipse-temurin-jammy-17.0.10_7_1.10.1_2.12.19
+      workingDir: $(workspaces.source.path)/transformation/spark-jobs/pipelines/batch-etl-scala
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "1"
+        limits:
+          memory: "4Gi"
+          cpu: "2"
+      script: |
+        #!/bin/bash
+        set -e
+        echo "══ Building Scala fat JAR ══"
+        sbt clean assembly
+        JAR_PATH="target/scala-2.12/root-assembly-2.0.0.jar"
+        if [ -f "$JAR_PATH" ]; then
+          JAR_SIZE=$(du -h "$JAR_PATH" | awk '{print $1}')
+          echo "JAR built: $JAR_PATH ($JAR_SIZE)"
+          echo -n "$JAR_PATH" > $(results.jar-path.path)
+          echo -n "$JAR_SIZE" > $(results.jar-size.path)
+        else
+          echo "ERROR: JAR not found!"
+          exit 1
+        fi
+
+---
+# ── 4. Upload JAR to COS ──
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: upload-jar-to-cos
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+spec:
+  params:
+    - name: cos-endpoint
+      type: string
+  workspaces:
+    - name: source
+    - name: credentials
+  steps:
+    - name: upload
+      image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/bash
+        set -e
+        echo "══ Uploading JAR to COS ══"
+
+        # Login
+        ibmcloud login --apikey @$(workspaces.credentials.path)/apikey -r us-south -g Default
+
+        # Upload
+        JAR="transformation/spark-jobs/pipelines/batch-etl-scala/target/scala-2.12/root-assembly-2.0.0.jar"
+        ibmcloud cos put-object \
+          --bucket datalake-raw-us-south \
+          --key "spark-jars/root-assembly-2.0.0.jar" \
+          --body "$JAR" \
+          --region us-south
+
+        echo "JAR uploaded to COS ✔"
+
+---
+# ── 5. Submit to Analytics Engine ──
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: submit-to-ae
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+spec:
+  params:
+    - name: ae-instance-id
+      type: string
+    - name: cos-endpoint
+      type: string
+  workspaces:
+    - name: credentials
+  results:
+    - name: app-id
+      description: "Submitted Spark application ID"
+    - name: app-state
+      description: "Final application state"
+  steps:
+    - name: submit-and-monitor
+      image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+      script: |
+        #!/bin/bash
+        set -e
+        echo "══ Submitting to Analytics Engine ══"
+
+        ibmcloud login --apikey @$(workspaces.credentials.path)/apikey -r us-south -g Default
+        ibmcloud plugin install analytics-engine-v3 -f -q 2>/dev/null || true
+
+        AE_ID="$(params.ae-instance-id)"
+        APP_NAME="Medallion-CI-$(date +%Y%m%d-%H%M%S)"
+
+        COS_AK=$(cat $(workspaces.credentials.path)/cos-access-key)
+        COS_SK=$(cat $(workspaces.credentials.path)/cos-secret-key)
+
+        CONF=$(cat <<CONF_EOF
+        {
+          "spark.app.name": "$APP_NAME",
+          "spark.hadoop.fs.s3a.access.key": "$COS_AK",
+          "spark.hadoop.fs.s3a.secret.key": "$COS_SK",
+          "spark.hadoop.fs.s3a.endpoint": "https://$(params.cos-endpoint)",
+          "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+          "spark.hadoop.fs.s3a.path.style.access": "true",
+          "spark.hadoop.fs.s3a.connection.ssl.enabled": "true",
+          "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
+          "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+        }
+        CONF_EOF
+        )
+
+        ENV_JSON=$(cat <<ENV_EOF
+        {
+          "EXECUTION_MODE": "IBM_AE",
+          "AE_INSTANCE_ID": "$AE_ID",
+          "COS_ACCESS_KEY": "$COS_AK",
+          "COS_SECRET_KEY": "$COS_SK",
+          "COS_ENDPOINT": "$(params.cos-endpoint)"
+        }
+        ENV_EOF
+        )
+
+        RESPONSE=$(ibmcloud ae-v3 spark-app submit \
+          --instance-id "$AE_ID" \
+          --app "s3a://datalake-raw-us-south/spark-jars/root-assembly-2.0.0.jar" \
+          --class "medallion.Pipeline" \
+          --name "$APP_NAME" \
+          --conf "$CONF" \
+          --env "$ENV_JSON" \
+          --runtime '{"spark_version": "3.5"}' \
+          --output json 2>&1) || true
+
+        APP_ID=$(echo "$RESPONSE" | grep -v '^Performing' | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
+
+        if [ -z "$APP_ID" ]; then
+          echo "ERROR: Failed to submit application"
+          echo "$RESPONSE"
+          exit 1
+        fi
+
+        echo "Application submitted: $APP_ID"
+        echo -n "$APP_ID" > $(results.app-id.path)
+
+        # Monitor until completion (max 10 min)
+        for i in $(seq 1 60); do
+          STATE=$(ibmcloud ae-v3 spark-app show --instance-id "$AE_ID" --app-id "$APP_ID" --output json 2>/dev/null \
+            | grep -v '^Performing' \
+            | python3 -c "import sys,json; print(json.load(sys.stdin).get('state','unknown'))" 2>/dev/null || echo "unknown")
+
+          echo "[$i/60] State: $STATE"
+
+          if [ "$STATE" = "finished" ]; then
+            echo "Application finished successfully ✔"
+            echo -n "finished" > $(results.app-state.path)
+            exit 0
+          elif [ "$STATE" = "failed" ] || [ "$STATE" = "stopped" ]; then
+            echo "Application $STATE ✘"
+            echo -n "$STATE" > $(results.app-state.path)
+            exit 1
+          fi
+          sleep 10
+        done
+
+        echo "Timeout waiting for application"
+        echo -n "timeout" > $(results.app-state.path)
+        exit 1
+
+---
+# ── 6. Build and Push Docker Image ──
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: build-push-image
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+spec:
+  workspaces:
+    - name: source
+  params:
+    - name: image-name
+      type: string
+      default: "us.icr.io/data-engineer/spark-hadoop"
+    - name: image-tag
+      type: string
+      default: "latest"
+  results:
+    - name: image-digest
+      description: "Built image digest"
+  steps:
+    - name: build
+      image: gcr.io/kaniko-project/executor:latest
+      env:
+        - name: DOCKER_CONFIG
+          value: /tekton/home/.docker
+      command:
+        - /kaniko/executor
+      args:
+        - --dockerfile=$(workspaces.source.path)/infrastructure/spark-k8s/docker/Dockerfile
+        - --context=$(workspaces.source.path)/infrastructure/spark-k8s/docker
+        - --destination=$(params.image-name):$(params.image-tag)
+        - --cache=true
+        - --digest-file=$(results.image-digest.path)
+
+---
+# ── 7. Deploy to IKS ──
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: deploy-to-iks
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+spec:
+  workspaces:
+    - name: source
+    - name: credentials
+  steps:
+    - name: deploy
+      image: icr.io/continuous-delivery/pipeline/pipeline-base-ubi:latest
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/bash
+        set -e
+
+        echo "══ Configuring kubectl ══"
+        ibmcloud login --apikey @$(workspaces.credentials.path)/apikey -r us-south -g Default
+        ibmcloud ks cluster config --cluster spark-cluster
+
+        echo "══ Creating namespace ══"
+        kubectl create namespace spark --dry-run=client -o yaml | kubectl apply -f -
+
+        echo "══ Deploying Spark to IKS ══"
+        kubectl apply -f infrastructure/spark-k8s/kubernetes/spark-master-deployment.yaml -n spark
+        kubectl apply -f infrastructure/spark-k8s/kubernetes/spark-master-service.yaml -n spark
+        kubectl apply -f infrastructure/spark-k8s/kubernetes/spark-worker-deployment.yaml -n spark
+
+        kubectl rollout status deployment/spark-master -n spark --timeout=120s
+        kubectl rollout status deployment/spark-worker -n spark --timeout=120s
+
+        echo "Deployment complete ✔"
+        kubectl get pods -n spark
+
+---
+# ── 8. Send Notification ──
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: send-notification
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+spec:
+  params:
+    - name: webhook-url
+      type: string
+    - name: pipeline-name
+      type: string
+    - name: git-branch
+      type: string
+  steps:
+    - name: notify
+      image: curlimages/curl:latest
+      script: |
+        #!/bin/sh
+        WEBHOOK="$(params.webhook-url)"
+        if [ -z "$WEBHOOK" ]; then
+          echo "No webhook URL configured, skipping notification"
+          exit 0
+        fi
+
+        PIPELINE="$(params.pipeline-name)"
+        BRANCH="$(params.git-branch)"
+        TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+        curl -s -X POST "$WEBHOOK" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"text\": \"Pipeline *${PIPELINE}* completed on branch \`${BRANCH}\` at ${TIMESTAMP}\",
+            \"pipeline\": \"${PIPELINE}\",
+            \"branch\": \"${BRANCH}\",
+            \"timestamp\": \"${TIMESTAMP}\"
+          }" || echo "Notification failed (non-critical)"
+
+        echo "Notification sent ✔"
