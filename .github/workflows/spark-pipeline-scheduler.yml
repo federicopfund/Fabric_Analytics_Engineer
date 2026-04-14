@@ -67,7 +67,9 @@ jobs:
     if: ${{ github.event.inputs.skip_csv_upload != 'true' }}
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        run: |
+          git clone --depth 1 https://github.com/${{ github.repository }}.git repo
+          cd repo
 
       - name: Install IBM Cloud CLI
         run: |
@@ -83,7 +85,7 @@ jobs:
 
       - name: Upload CSV files to COS raw bucket
         run: |
-          CSV_DIR="transformation/spark-jobs/pipelines/batch-etl-scala/datalake/raw"
+          CSV_DIR="repo/transformation/spark-jobs/pipelines/batch-etl-scala/datalake/raw"
           if [ ! -d "$CSV_DIR" ]; then
             echo "::warning::CSV directory not found: $CSV_DIR"
             exit 0
