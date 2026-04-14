@@ -1,31 +1,24 @@
 package simulator
 
-import org.apache.spark.sql.{SaveMode, SparkSession}
+import org.apache.spark.sql.{Row, SaveMode, SparkSession}
 import org.apache.spark.sql.types._
+import org.apache.spark.sql.{functions => F}
 
 import java.time.LocalDate
-import java.time.format.DateTimeFormatter
 
 /**
- * SimulatorApp — Punto de entrada de la aplicación.
+ * SimulatorApp — Genera ventas sintéticas a escala y escribe directamente a
+ * s3a://{bucket}/VentasInternet.csv para que el pipeline Medallion las
+ * procese en la siguiente ejecución (Bronze → Silver → Gold).
  *
- * Genera ventas sintéticas realistas y las escribe directamente al bucket RAW
- * de IBM COS en formato CSV, compatible con el pipeline Medallion existente.
+ * La generación es DISTRIBUIDA (en workers vía mapPartitionsWithIndex)
+ * para soportar 10M+ registros sin OOM en el driver.
  *
- * Las ventas se appendean al archivo VentasInternet.csv de forma que el
- * pipeline batch-etl-scala las procese automáticamente en la siguiente
- * ejecución (Bronze → Silver → Gold).
- *
- * Uso:
- *   spark-submit --class simulator.SimulatorApp sales-simulator-assembly-1.0.0.jar \
- *     [--orders N] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--seed N]
- *
- * Args:
- *   --orders N          Número de órdenes a generar (default: 1000)
- *   --start YYYY-MM-DD  Fecha inicio (default: hace 30 días)
- *   --end YYYY-MM-DD    Fecha fin (default: hoy)
- *   --seed N            Seed para reproducibilidad (default: timestamp)
- *   --dry-run           Solo genera y muestra estadísticas, no escribe a COS
+ * Parámetros (env vars inyectadas por submit-simulator.sh):
+ *   SIM_ORDERS   Número de órdenes (default: 10000000)
+ *   SIM_START    Fecha inicio YYYY-MM-DD
+ *   SIM_END      Fecha fin YYYY-MM-DD
+ *   SIM_SEED     Seed para reproducibilidad
  */
 object SimulatorApp {
 
@@ -48,18 +41,16 @@ object SimulatorApp {
   def main(args: Array[String]): Unit = {
     val params = parseArgs(args)
 
-    // CLI args take priority, then env vars, then defaults
     val numOrders = params.getOrElse("orders",
-      envOrDefault("SIM_ORDERS", "1000")).toInt
+      envOrDefault("SIM_ORDERS", "10000000")).toInt
     val startDate = LocalDate.parse(
       params.getOrElse("start",
-        envOrDefault("SIM_START", LocalDate.now().minusDays(30).toString)))
+        envOrDefault("SIM_START", LocalDate.now().minusDays(365).toString)))
     val endDate = LocalDate.parse(
       params.getOrElse("end",
         envOrDefault("SIM_END", LocalDate.now().toString)))
     val seed = params.getOrElse("seed",
       envOrDefault("SIM_SEED", System.currentTimeMillis().toString)).toLong
-    val dryRun = params.contains("dry-run")
 
     println(
       s"""
@@ -69,32 +60,10 @@ object SimulatorApp {
          |  Órdenes:    $numOrders
          |  Rango:      $startDate → $endDate
          |  Seed:       $seed
-         |  Dry-run:    $dryRun
          |""".stripMargin)
 
-    // ── Generar ventas ──
-    println("[1/4] Generando ventas sintéticas...")
-    val ventas = SalesGenerator.generate(
-      numOrders   = numOrders,
-      startDate   = startDate,
-      endDate     = endDate,
-      orderOffset = 0,
-      seed        = seed
-    )
-    println(s"  ✓ ${ventas.size} registros generados")
-
-    // ── Estadísticas ──
-    println("[2/4] Calculando estadísticas...")
-    printStats(ventas)
-
-    if (dryRun) {
-      println("\n⚠ Modo dry-run: no se escriben datos a COS.")
-      println("✔ Simulación completada.")
-      return
-    }
-
     // ── Spark Session ──
-    println("[3/4] Inicializando Spark y COS...")
+    println("[1/4] Inicializando Spark y COS...")
     val spark = SparkSession.builder()
       .appName("SalesSimulator-Medallion")
       .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
@@ -104,67 +73,101 @@ object SimulatorApp {
     val cosConfig = CosConfig.load()
     CosConfig.configureSparkS3A(spark, cosConfig)
 
-    import spark.implicits._
+    // ── Generación distribuida en workers ──
+    println("[2/4] Generando ventas de forma distribuida...")
+    val numPartitions = math.max(8, numOrders / 500000)
+    val ordersPerPartition = numOrders / numPartitions
+    val remainderOrders = numOrders % numPartitions
 
-    // ── Convertir a DataFrame ──
-    val ventasDF = spark.createDataFrame(
-      spark.sparkContext.parallelize(ventas.map(v =>
-        org.apache.spark.sql.Row(
-          v.codProducto, v.codCliente, v.codTerritorio, v.numeroOrden,
-          v.cantidad, v.precioUnitario, v.costoUnitario,
-          v.impuesto, v.flete,
-          v.fechaOrden, v.fechaEnvio, v.fechaVencimiento,
-          v.codPromocion
-        )
-      )),
-      ventasSchema
-    )
+    // Broadcast params (no closures sobre objetos grandes)
+    val startStr = startDate.toString
+    val endStr = endDate.toString
+    val seedVal = seed
 
-    // ── Escribir al bucket RAW como CSV (append) ──
-    println("[4/4] Escribiendo al bucket RAW de COS...")
-    val rawPath = s"s3a://${cosConfig.bucketRaw}/VentasInternet_sim"
-    val timestamp = java.time.Instant.now().toString.replace(":", "-").take(19)
+    val rowsRDD = spark.sparkContext
+      .parallelize(0 until numPartitions, numPartitions)
+      .mapPartitionsWithIndex { (partIdx, _) =>
+        val pStart = LocalDate.parse(startStr)
+        val pEnd = LocalDate.parse(endStr)
+        val pSeed = seedVal + partIdx
+        val pOrders = ordersPerPartition + (if (partIdx < remainderOrders) 1 else 0)
+        val orderOffset = partIdx * ordersPerPartition + math.min(partIdx, remainderOrders)
+
+        val ventas = SalesGenerator.generate(pOrders, pStart, pEnd, orderOffset, pSeed)
+        ventas.iterator.map { v =>
+          Row(
+            v.codProducto, v.codCliente, v.codTerritorio, v.numeroOrden,
+            v.cantidad, v.precioUnitario, v.costoUnitario,
+            v.impuesto, v.flete,
+            v.fechaOrden, v.fechaEnvio, v.fechaVencimiento,
+            v.codPromocion
+          )
+        }
+      }
+
+    val ventasDF = spark.createDataFrame(rowsRDD, ventasSchema)
+    ventasDF.cache()
+
+    val count = ventasDF.count()
+    println(s"  ✓ $count registros generados en $numPartitions particiones")
+
+    // ── Estadísticas ──
+    println("[3/4] Calculando estadísticas...")
+    printDistributedStats(ventasDF)
+
+    // ── Escribir a VentasInternet.csv en la raíz del bucket RAW ──
+    println("[4/4] Escribiendo VentasInternet.csv al bucket RAW...")
+    val tmpPath = s"s3a://${cosConfig.bucketRaw}/_tmp_ventas_sim"
+    val targetCsv = s"s3a://${cosConfig.bucketRaw}/VentasInternet.csv"
 
     ventasDF
       .coalesce(1)
       .write
-      .mode(SaveMode.Append)
+      .mode(SaveMode.Overwrite)
       .option("header", "true")
       .option("timestampFormat", "yyyy-MM-dd HH:mm:ss")
-      .csv(s"$rawPath/batch_$timestamp")
+      .csv(tmpPath)
 
-    val count = ventasDF.count()
-    println(s"  ✓ $count registros escritos en: $rawPath/batch_$timestamp")
+    // Spark escribe carpeta con part-xxx, renombramos a CSV plano
+    val hadoopConf = spark.sparkContext.hadoopConfiguration
+    val fs = org.apache.hadoop.fs.FileSystem.get(
+      new java.net.URI(s"s3a://${cosConfig.bucketRaw}"), hadoopConf)
+    val tmpDir = new org.apache.hadoop.fs.Path(tmpPath)
+    val targetFile = new org.apache.hadoop.fs.Path(targetCsv)
 
-    // ── Resumen por territorio ──
+    val partFile = fs.listStatus(tmpDir)
+      .map(_.getPath)
+      .find(_.getName.endsWith(".csv"))
+      .getOrElse(throw new RuntimeException("No se generó archivo CSV"))
+
+    if (fs.exists(targetFile)) fs.delete(targetFile, false)
+    fs.rename(partFile, targetFile)
+    fs.delete(tmpDir, true)
+
+    println(s"  ✓ $count registros escritos en: $targetCsv")
+
+    // ── Resúmenes ──
     println("\n── Resumen por Territorio ──")
     ventasDF.groupBy("Cod_Territorio")
       .agg(
-        org.apache.spark.sql.functions.count("*").as("total_ventas"),
-        org.apache.spark.sql.functions.sum(
-          org.apache.spark.sql.functions.col("Cantidad") *
-          org.apache.spark.sql.functions.col("PrecioUnitario")
-        ).as("ingreso_total")
+        F.count("*").as("total_ventas"),
+        F.sum(F.col("Cantidad") * F.col("PrecioUnitario")).as("ingreso_total")
       )
       .orderBy("Cod_Territorio")
       .show(false)
 
-    // ── Resumen mensual ──
     println("── Resumen Mensual ──")
     ventasDF
-      .withColumn("Mes", org.apache.spark.sql.functions.month(
-        org.apache.spark.sql.functions.col("FechaOrden")))
+      .withColumn("Mes", F.month(F.col("FechaOrden")))
       .groupBy("Mes")
       .agg(
-        org.apache.spark.sql.functions.count("*").as("ordenes"),
-        org.apache.spark.sql.functions.sum(
-          org.apache.spark.sql.functions.col("Cantidad") *
-          org.apache.spark.sql.functions.col("PrecioUnitario")
-        ).as("ingreso")
+        F.count("*").as("ordenes"),
+        F.sum(F.col("Cantidad") * F.col("PrecioUnitario")).as("ingreso")
       )
       .orderBy("Mes")
       .show(false)
 
+    ventasDF.unpersist()
     spark.stop()
 
     println(
@@ -174,41 +177,40 @@ object SimulatorApp {
          |╚══════════════════════════════════════════════════════╝
          |  Registros:  $count
          |  Bucket:     ${cosConfig.bucketRaw}
-         |  Path:       VentasInternet_sim/batch_$timestamp
+         |  Archivo:    VentasInternet.csv
          |
-         |  → Ejecutar pipeline Medallion para procesar:
+         |  → El pipeline Medallion leerá estos datos automáticamente:
          |    Bronze → Silver → Gold
          |""".stripMargin)
   }
 
-  private def printStats(ventas: Seq[SalesGenerator.VentaRecord]): Unit = {
-    val totalRevenue = ventas.map(v => v.cantidad * v.precioUnitario).sum
-    val totalCost    = ventas.map(v => v.cantidad * v.costoUnitario).sum
-    val avgOrder     = if (ventas.nonEmpty) totalRevenue / ventas.size else 0.0
-    val uniqueProducts  = ventas.map(_.codProducto).distinct.size
-    val uniqueCustomers = ventas.map(_.codCliente).distinct.size
-    val uniqueTerritories = ventas.map(_.codTerritorio).distinct.size
+  private def printDistributedStats(df: org.apache.spark.sql.DataFrame): Unit = {
+    val stats = df.agg(
+      F.count("*").as("total"),
+      F.sum(F.col("Cantidad") * F.col("PrecioUnitario")).as("ingreso"),
+      F.sum(F.col("Cantidad") * F.col("CostoUnitario")).as("costo"),
+      F.avg(F.col("Cantidad") * F.col("PrecioUnitario")).as("ticket_avg"),
+      F.countDistinct("Cod_Producto").as("productos"),
+      F.countDistinct("Cod_Cliente").as("clientes"),
+      F.countDistinct("Cod_Territorio").as("territorios")
+    ).collect()(0)
 
-    val bySegment = ventas.groupBy { v =>
-      ProductCatalog.priceMap.get(v.codProducto).map(_._1) match {
-        case Some(p) if p > 1000 => "Bicicletas"
-        case Some(p) if p > 30   => "Prendas/Cascos"
-        case _                   => "Accesorios"
-      }
-    }.map { case (seg, vs) => (seg, vs.size, vs.map(v => v.cantidad * v.precioUnitario).sum) }
+    val total = stats.getLong(0)
+    val ingreso = stats.getDouble(1)
+    val costo = stats.getDouble(2)
+    val ticket = stats.getDouble(3)
+    val prods = stats.getLong(4)
+    val clients = stats.getLong(5)
+    val terrs = stats.getLong(6)
 
-    println(f"  Total órdenes:      ${ventas.size}%,d")
-    println(f"  Ingreso bruto:      $$${totalRevenue}%,.2f")
-    println(f"  Costo total:        $$${totalCost}%,.2f")
-    println(f"  Margen bruto:       $$${totalRevenue - totalCost}%,.2f (${(totalRevenue - totalCost) / totalRevenue * 100}%.1f%%)")
-    println(f"  Ticket promedio:    $$${avgOrder}%,.2f")
-    println(f"  Productos únicos:   $uniqueProducts%d")
-    println(f"  Clientes únicos:    $uniqueCustomers%d")
-    println(f"  Territorios:        $uniqueTerritories%d")
-    println("  ── Distribución por segmento ──")
-    bySegment.toSeq.sortBy(-_._3).foreach { case (seg, count, rev) =>
-      println(f"     $seg%-18s → $count%,5d órdenes | $$${rev}%,.2f")
-    }
+    println(f"  Total órdenes:      $total%,d")
+    println(f"  Ingreso bruto:      $$${ingreso}%,.2f")
+    println(f"  Costo total:        $$${costo}%,.2f")
+    println(f"  Margen bruto:       $$${ingreso - costo}%,.2f (${(ingreso - costo) / ingreso * 100}%.1f%%)")
+    println(f"  Ticket promedio:    $$${ticket}%,.2f")
+    println(f"  Productos únicos:   $prods%d")
+    println(f"  Clientes únicos:    $clients%d")
+    println(f"  Territorios:        $terrs%d")
   }
 
   private def parseArgs(args: Array[String]): Map[String, String] = {
@@ -216,9 +218,6 @@ object SimulatorApp {
     var i = 0
     while (i < args.length) {
       args(i) match {
-        case "--dry-run" =>
-          m("dry-run") = "true"
-          i += 1
         case key if key.startsWith("--") && i + 1 < args.length =>
           m(key.stripPrefix("--")) = args(i + 1)
           i += 2

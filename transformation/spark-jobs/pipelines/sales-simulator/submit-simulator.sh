@@ -4,10 +4,10 @@
 #                        a IBM Analytics Engine Serverless
 #
 # Uso:
-#   ./submit-simulator.sh                              # Build + upload + submit (1000 órdenes)
+#   ./submit-simulator.sh                              # Build + upload + submit (10M órdenes)
 #   ./submit-simulator.sh --skip-build                 # Submit pre-built JAR
-#   ./submit-simulator.sh --orders 5000                # Generar 5000 órdenes
-#   ./submit-simulator.sh --orders 2000 --start 2026-01-01 --end 2026-03-31
+#   ./submit-simulator.sh --orders 10000000             # Generar 10M órdenes
+#   ./submit-simulator.sh --orders 5000 --start 2026-01-01 --end 2026-06-30
 #   ./submit-simulator.sh --status <app_id>            # Ver estado
 #   ./submit-simulator.sh --logs <app_id>              # Ver logs
 # ═══════════════════════════════════════════════════════════════
@@ -26,7 +26,7 @@ AE_REGION="${AE_REGION:-us-south}"
 COS_ACCESS_KEY="${COS_ACCESS_KEY:-${AWS_ACCESS_KEY_ID:-}}"
 COS_SECRET_KEY="${COS_SECRET_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
 COS_ENDPOINT="${COS_ENDPOINT:-s3.us-south.cloud-object-storage.appdomain.cloud}"
-COS_BUCKET_RAW="${COS_BUCKET_RAW:-datalake-raw-us-south-dev}"
+COS_BUCKET_RAW="${COS_BUCKET_RAW:-datalake-raw-us-south}"
 
 SCALA_PROJECT_DIR="${SCRIPT_DIR}"
 JAR_NAME="sales-simulator-assembly-1.0.0.jar"
@@ -34,7 +34,7 @@ JAR_LOCAL="${SCALA_PROJECT_DIR}/target/scala-2.12/${JAR_NAME}"
 JAR_COS_KEY="spark-jars/${JAR_NAME}"
 
 # Default simulation params
-SIM_ORDERS="${SIM_ORDERS:-1000}"
+SIM_ORDERS="${SIM_ORDERS:-10000000}"
 SIM_START="${SIM_START:-}"
 SIM_END="${SIM_END:-}"
 SIM_SEED="${SIM_SEED:-}"
