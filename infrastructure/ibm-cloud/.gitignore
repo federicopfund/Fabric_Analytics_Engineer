@@ -8,6 +8,8 @@ terraform.tfstate.backup
 .terraform.lock.hcl
 *.pem
 *.key
+tfplan
+tfplan*
 
 # Build artifacts
 *.jar
@@ -21,3 +23,4 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+#
