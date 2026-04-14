@@ -118,12 +118,11 @@ object DataLakeIO {
   }
 
   def pathExists(filePath: String): Boolean = {
-    if (filePath.startsWith("hdfs://")) {
+    if (filePath.startsWith("hdfs://") || filePath.startsWith("s3a://") || filePath.startsWith("s3://")) {
       try {
-        val conf = new Configuration()
-        conf.set("fs.defaultFS", filePath.split("/").take(3).mkString("/"))
-        conf.set("dfs.client.use.datanode.hostname", "true")
-        val fs = FileSystem.get(conf)
+        val uri = new java.net.URI(filePath)
+        val conf = SparkSession.active.sparkContext.hadoopConfiguration
+        val fs = FileSystem.get(uri, conf)
         val p = new Path(filePath)
         if (!fs.exists(p)) return false
         if (fs.isFile(p)) return true
