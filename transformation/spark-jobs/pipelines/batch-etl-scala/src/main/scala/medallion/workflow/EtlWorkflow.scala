@@ -2,7 +2,7 @@ package medallion.workflow
 
 import org.apache.spark.sql.SparkSession
 import org.apache.log4j.Logger
-import medallion.config.{DatalakeConfig, TableRegistry}
+import medallion.config.{DatalakeConfig, Db2Config, TableRegistry}
 import medallion.infra.{DataLakeIO, HdfsManager}
 import medallion.layer.{BronzeLayer, SilverLayer, GoldLayer}
 import scala.util.control.NonFatal
@@ -53,7 +53,9 @@ object EtlWorkflow {
       rawPath = s"$base/raw", bronzePath = s"$base/bronze",
       silverPath = s"$base/silver", goldPath = s"$base/gold",
       chartsPath = chartsDir, lineagePath = lineageDir, metricsPath = metricsDir,
-      checkpointPath = checkpointDir
+      checkpointPath = checkpointDir,
+      db2Enabled = Db2Config.fromEnv().isDefined,
+      db2Config = Db2Config.fromEnv()
     )
     Seq(config.rawPath, config.bronzePath, config.silverPath, config.goldPath,
         config.lineagePath, config.metricsPath, config.checkpointPath).foreach(dir => new java.io.File(dir).mkdirs())
