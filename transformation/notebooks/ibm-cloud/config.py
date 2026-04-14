@@ -1,6 +1,7 @@
 """
 IBM Cloud - Shared configuration for the Medallion Pipeline.
-COS endpoints, credentials, bucket names, and SparkSession builder.
+COS endpoints, credentials, bucket names, SparkSession builder,
+and Analytics Engine integration.
 """
 import os
 
@@ -30,6 +31,20 @@ DB2_CONFIG = {
     "database": "bludb",
     "username": os.environ.get("DB2_USER", "qtn87286"),
     "password": os.environ.get("DB2_PASS", "G5VYX4VkCRqrKeNz"),
+}
+
+# ---------------------------------------------------------------------------
+# IBM Analytics Engine Serverless
+# ---------------------------------------------------------------------------
+AE_CONFIG = {
+    "instance_id": os.environ.get("AE_INSTANCE_ID", "a688f3c4-efa9-4f12-842c-6a8d73a7ed2e"),
+    "api_key": os.environ.get("AE_API_KEY", "xHUG0tM8_CBFioN8ckds52eLxys_bnHL3CK4PCwg48o-"),
+    "region": "us-south",
+    "api_endpoint": os.environ.get("AE_API_ENDPOINT",
+        "https://api.us-south.ae.cloud.ibm.com/v3/analytics_engines/a688f3c4-efa9-4f12-842c-6a8d73a7ed2e"),
+    "spark_applications_url": os.environ.get("AE_SPARK_APPS_URL",
+        "https://api.us-south.ae.cloud.ibm.com/v3/analytics_engines/a688f3c4-efa9-4f12-842c-6a8d73a7ed2e/spark_applications"),
+    "history_ui": "https://spark-console.us-south.ae.cloud.ibm.com/v3/analytics_engines/a688f3c4-efa9-4f12-842c-6a8d73a7ed2e/spark_history_ui",
 }
 
 DB2_JDBC_URL = (
@@ -62,9 +77,10 @@ def build_spark(app_name: str = "IBM-Medallion-Pipeline"):
         "io.delta:delta-core_2.12:2.3.0",
     ])
 
-    return (
-        SparkSession.builder
-        .appName(app_name)
+    builder = SparkSession.builder
+    builder = (
+        builder
+        .appName(app_name)  # type: ignore[union-attr]
         .config("spark.jars.packages", packages)
         .config("spark.hadoop.fs.s3a.access.key", COS_CONFIG["access_key"])
         .config("spark.hadoop.fs.s3a.secret.key", COS_CONFIG["secret_key"])
@@ -79,3 +95,5 @@ def build_spark(app_name: str = "IBM-Medallion-Pipeline"):
         .master("local[*]")
         .getOrCreate()
     )
+
+    return builder
