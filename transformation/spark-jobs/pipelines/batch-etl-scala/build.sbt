@@ -61,6 +61,8 @@ lazy val root = (project in file("."))
     }
   )
   .settings(
+    Test / classLoaderLayeringStrategy := ClassLoaderLayeringStrategy.Flat,
+    Test / fork := true,
     Compile / run / fork := true,
     Compile / runMain / fork := true,
     javaOptions ++= Seq(
