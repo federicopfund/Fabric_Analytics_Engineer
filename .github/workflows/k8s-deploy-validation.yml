@@ -1,0 +1,236 @@
+# ═══════════════════════════════════════════════════════════════
+# K8s Deploy Validation — CI Pipeline
+# Valida manifests, security, structure, y deploy en Kind cluster
+# ═══════════════════════════════════════════════════════════════
+name: K8s Deploy Validation
+
+on:
+  push:
+    paths:
+      - 'infrastructure/spark-k8s/**'
+  pull_request:
+    paths:
+      - 'infrastructure/spark-k8s/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ════════════════════════════════════════════════════════════
+  # Job 1: Static validation (pytest + yaml lint)
+  # ════════════════════════════════════════════════════════════
+  manifest-tests:
+    name: "Manifest Unit Tests"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infrastructure/spark-k8s
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install pytest pyyaml
+
+      - name: Run manifest unit tests
+        run: |
+          echo "═══ Running pytest manifest validation ═══"
+          python3 -m pytest tests/test_k8s_manifests.py -v --tb=short \
+            --junit-xml=test-results.xml 2>&1 | tee test-output.txt
+
+      - name: Test Summary
+        if: always()
+        run: |
+          echo "## K8s Manifest Test Results" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -20 test-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ════════════════════════════════════════════════════════════
+  # Job 2: kubectl dry-run + static validation script
+  # ════════════════════════════════════════════════════════════
+  static-validation:
+    name: "Static Validation"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infrastructure/spark-k8s
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run static validation
+        run: |
+          chmod +x tests/validate-deploy.sh
+          ./tests/validate-deploy.sh 2>&1 | tee validation-output.txt
+
+      - name: Validation Summary
+        if: always()
+        run: |
+          echo "## Static Validation Results" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat validation-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ════════════════════════════════════════════════════════════
+  # Job 3: Integration test con Kind cluster
+  # ════════════════════════════════════════════════════════════
+  integration-test:
+    name: "Integration Test (Kind)"
+    runs-on: ubuntu-latest
+    needs: [manifest-tests, static-validation]
+    defaults:
+      run:
+        working-directory: infrastructure/spark-k8s
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Kind cluster
+        run: |
+          # Instalar Kind
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+          # Crear cluster con config para NetworkPolicy support
+          cat <<EOF | kind create cluster --name spark-test --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+            - role: control-plane
+            - role: worker
+              labels:
+                workload-type: spark
+            - role: worker
+              labels:
+                workload-type: compute
+          EOF
+
+          kubectl cluster-info
+          kubectl get nodes -o wide
+
+      - name: Deploy and validate (live)
+        env:
+          COS_ACCESS_KEY: "test-access-key-ci"
+          COS_SECRET_KEY: "test-secret-key-ci"
+          DB2_HOSTNAME: "test-db2.example.com"
+          DB2_PORT: "30376"
+          DB2_DATABASE: "bludb"
+          DB2_USERNAME: "testuser"
+          DB2_PASSWORD: "testpassword"
+          IBMCLOUD_API_KEY: "test-api-key-ci"
+        run: |
+          chmod +x tests/validate-deploy.sh
+          ./tests/validate-deploy.sh --live --cleanup 2>&1 | tee integration-output.txt
+
+      - name: Integration Summary
+        if: always()
+        run: |
+          echo "## Integration Test Results" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat integration-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup Kind cluster
+        if: always()
+        run: kind delete cluster --name spark-test 2>/dev/null || true
+
+  # ════════════════════════════════════════════════════════════
+  # Job 4: Security audit
+  # ════════════════════════════════════════════════════════════
+  security-audit:
+    name: "Security Audit"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infrastructure/spark-k8s
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Security checks
+        run: |
+          echo "═══ K8s Security Audit ═══"
+          ISSUES=0
+
+          echo ""
+          echo "── Checking for privileged containers ──"
+          if grep -r 'privileged: true' kubernetes/ 2>/dev/null; then
+            echo "✗ CRITICAL: Privileged containers found"
+            ISSUES=$((ISSUES+1))
+          else
+            echo "✓ No privileged containers"
+          fi
+
+          echo ""
+          echo "── Checking for hostNetwork ──"
+          if grep -r 'hostNetwork: true' kubernetes/ 2>/dev/null; then
+            echo "✗ CRITICAL: hostNetwork enabled"
+            ISSUES=$((ISSUES+1))
+          else
+            echo "✓ No hostNetwork usage"
+          fi
+
+          echo ""
+          echo "── Checking for hostPID ──"
+          if grep -r 'hostPID: true' kubernetes/ 2>/dev/null; then
+            echo "✗ CRITICAL: hostPID enabled"
+            ISSUES=$((ISSUES+1))
+          else
+            echo "✓ No hostPID usage"
+          fi
+
+          echo ""
+          echo "── Checking for root containers ──"
+          if grep -r 'runAsUser: 0' kubernetes/ 2>/dev/null; then
+            echo "✗ WARNING: Running as root (UID 0)"
+            ISSUES=$((ISSUES+1))
+          else
+            echo "✓ No root UID containers"
+          fi
+
+          echo ""
+          echo "── Checking for wildcard RBAC ──"
+          if grep -E "verbs:.*\"\*\"" kubernetes/rbac.yaml 2>/dev/null; then
+            echo "✗ CRITICAL: Wildcard verbs in RBAC"
+            ISSUES=$((ISSUES+1))
+          else
+            echo "✓ No wildcard RBAC verbs"
+          fi
+
+          echo ""
+          echo "── Checking for hardcoded credentials ──"
+          if grep -rE '(password|secret|token|apikey)\s*[:=]\s*["\x27][^${}]+["\x27]' \
+            kubernetes/ --include='*.yaml' 2>/dev/null | \
+            grep -v 'secretKeyRef\|templateVar\|\${\|placeholder\|test' ; then
+            echo "✗ WARNING: Possible hardcoded credentials"
+            ISSUES=$((ISSUES+1))
+          else
+            echo "✓ No hardcoded credentials detected"
+          fi
+
+          echo ""
+          echo "── Checking for resource limits ──"
+          if ! grep -q 'limits:' kubernetes/cronjob.yaml 2>/dev/null; then
+            echo "✗ WARNING: No resource limits in CronJob"
+            ISSUES=$((ISSUES+1))
+          else
+            echo "✓ Resource limits defined"
+          fi
+
+          echo ""
+          echo "── Checking image pull policy ──"
+          if grep -q 'imagePullPolicy: Always\|imagePullPolicy: IfNotPresent' kubernetes/cronjob.yaml; then
+            echo "✓ Image pull policy is set"
+          else
+            echo "⚠ No explicit imagePullPolicy"
+          fi
+
+          echo ""
+          echo "═══════════════════════════════════════"
+          if [[ $ISSUES -gt 0 ]]; then
+            echo "Security audit found ${ISSUES} issue(s)"
+            exit 1
+          else
+            echo "✓ Security audit passed — 0 issues"
+          fi
