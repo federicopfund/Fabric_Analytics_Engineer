@@ -15,7 +15,7 @@ set -euo pipefail
 
 # ── Configuration (hereda del .env o usa defaults del pipeline) ──
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ENV_FILE="${SCRIPT_DIR}/../../../infrastructure/ibm-cloud/.env"
+ENV_FILE="${SCRIPT_DIR}/../../../../infrastructure/ibm-cloud/.env"
 if [[ -f "$ENV_FILE" ]]; then
     set -a; source "$ENV_FILE"; set +a
 fi
@@ -163,7 +163,11 @@ EOF
     "COS_SECRET_KEY": "${COS_SECRET_KEY}",
     "COS_ENDPOINT": "${COS_ENDPOINT}",
     "COS_BUCKET_RAW": "${COS_BUCKET_RAW}",
-    "EXECUTION_MODE": "IBM_AE"
+    "EXECUTION_MODE": "IBM_AE",
+    "SIM_ORDERS": "${SIM_ORDERS}",
+    "SIM_START": "${SIM_START}",
+    "SIM_END": "${SIM_END}",
+    "SIM_SEED": "${SIM_SEED:-}"
 }
 EOF
 )
@@ -177,6 +181,7 @@ EOF
         --instance-id "${AE_INSTANCE_ID}" \
         --app "s3a://${COS_BUCKET_RAW}/${JAR_COS_KEY}" \
         --class "simulator.SimulatorApp" \
+        --name "${app_name}" \
         --conf "${conf_json}" \
         --env "${env_json}" \
         --runtime '{"spark_version": "3.5"}' \
@@ -200,16 +205,13 @@ EOF
 
 # ── Status / Logs / List ──
 check_status() {
-    ibmcloud ae-v3 spark-app get --instance-id "${AE_INSTANCE_ID}" --app-id "$1" --output json 2>&1 \
+    ibmcloud ae-v3 spark-app show --instance-id "${AE_INSTANCE_ID}" --app-id "$1" --output json 2>&1 \
         | grep -v '^Performing' | python3 -m json.tool
 }
 
 get_logs() {
-    ibmcloud ae-v3 spark-app get-state --instance-id "${AE_INSTANCE_ID}" --app-id "$1" --output json 2>&1 \
+    ibmcloud ae-v3 spark-app status --instance-id "${AE_INSTANCE_ID}" --app-id "$1" --output json 2>&1 \
         | grep -v '^Performing' | python3 -m json.tool
-    echo "---"
-    ibmcloud ae-v3 spark-app log-forwarding get --instance-id "${AE_INSTANCE_ID}" --app-id "$1" --output json 2>&1 \
-        | grep -v '^Performing' | python3 -m json.tool 2>/dev/null || true
 }
 
 list_apps() {

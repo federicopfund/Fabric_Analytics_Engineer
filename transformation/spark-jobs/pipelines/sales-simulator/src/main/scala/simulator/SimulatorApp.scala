@@ -47,12 +47,18 @@ object SimulatorApp {
 
   def main(args: Array[String]): Unit = {
     val params = parseArgs(args)
-    val numOrders = params.getOrElse("orders", "1000").toInt
+
+    // CLI args take priority, then env vars, then defaults
+    val numOrders = params.getOrElse("orders",
+      envOrDefault("SIM_ORDERS", "1000")).toInt
     val startDate = LocalDate.parse(
-      params.getOrElse("start", LocalDate.now().minusDays(30).toString))
+      params.getOrElse("start",
+        envOrDefault("SIM_START", LocalDate.now().minusDays(30).toString)))
     val endDate = LocalDate.parse(
-      params.getOrElse("end", LocalDate.now().toString))
-    val seed = params.getOrElse("seed", System.currentTimeMillis().toString).toLong
+      params.getOrElse("end",
+        envOrDefault("SIM_END", LocalDate.now().toString)))
+    val seed = params.getOrElse("seed",
+      envOrDefault("SIM_SEED", System.currentTimeMillis().toString)).toLong
     val dryRun = params.contains("dry-run")
 
     println(
@@ -221,4 +227,7 @@ object SimulatorApp {
     }
     m.toMap
   }
+
+  private def envOrDefault(key: String, default: String): String =
+    Option(System.getenv(key)).filter(_.nonEmpty).getOrElse(default)
 }
