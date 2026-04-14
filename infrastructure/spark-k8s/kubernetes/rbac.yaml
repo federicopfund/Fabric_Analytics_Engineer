@@ -1,0 +1,97 @@
+# ═══════════════════════════════════════════════════════════════
+# RBAC — ServiceAccount + Roles para Spark Driver/Executor pods
+#
+# El Spark driver necesita permisos para crear/eliminar executor
+# pods dinámicamente. Se usa el principio de mínimo privilegio.
+# ═══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark-driver
+  namespace: spark-medallion
+  labels:
+    app.kubernetes.io/component: driver
+    app.kubernetes.io/part-of: medallion-pipeline
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-driver-role
+  namespace: spark-medallion
+rules:
+  # Crear/eliminar executor pods
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]
+  # Acceder a logs de executor pods
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+  # Acceder a ConfigMaps para Spark event logs
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  # Acceder a services (Spark UI)
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "delete"]
+  # PersistentVolumeClaims para checkpoints
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-driver-binding
+  namespace: spark-medallion
+subjects:
+  - kind: ServiceAccount
+    name: spark-driver
+    namespace: spark-medallion
+roleRef:
+  kind: Role
+  name: spark-driver-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# ═══════════════════════════════════════════════════════════════
+# ResourceQuota — Límites del namespace para evitar noisy-neighbor
+# ═══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: spark-medallion-quota
+  namespace: spark-medallion
+spec:
+  hard:
+    requests.cpu: "8"
+    requests.memory: "16Gi"
+    limits.cpu: "12"
+    limits.memory: "24Gi"
+    pods: "20"
+    persistentvolumeclaims: "5"
+---
+# ═══════════════════════════════════════════════════════════════
+# LimitRange — Defaults y topes por pod/container
+# ═══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: spark-limits
+  namespace: spark-medallion
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "1"
+        memory: "2Gi"
+      defaultRequest:
+        cpu: "250m"
+        memory: "512Mi"
+      max:
+        cpu: "4"
+        memory: "8Gi"
+    - type: Pod
+      max:
+        cpu: "6"
+        memory: "12Gi"
