@@ -1,6 +1,7 @@
 package medallion
 
-import medallion.config.{DatalakeConfig, SparkFactory, TableRegistry}
+import medallion.config.{DatalakeConfig, Db2Config, IbmCloudConfig, SparkFactory, TableRegistry}
+import medallion.config.IbmCloudConfig.{ExecutionMode, IbmAnalyticsEngine, HdfsCluster, LocalMode}
 import medallion.engine.{DagExecutor, DagTask}
 import medallion.infra.HdfsManager
 import medallion.workflow._
@@ -8,25 +9,23 @@ import org.apache.log4j.{Logger, PropertyConfigurator}
 import scala.util.control.NonFatal
 
 /**
- * Pipeline v4.0 — Orquestador declarativo basado en DAG.
+ * Pipeline v6.0 — Orquestador declarativo con soporte IBM Cloud.
  *
  * Arquitectura:
  *   El pipeline se define como un grafo acíclico dirigido (DAG) donde cada
  *   task declara sus dependencias. El DagExecutor resuelve el orden óptimo,
  *   paraleliza tasks sin dependencias pendientes, y maneja retry/checkpoint.
  *
- *   ETL → [QUALITY || LINEAGE || ANALYTICS] → HIVE → METRICS
+ *   COS_UPLOAD → ETL → [QUALITY || LINEAGE || ANALYTICS || DB2_EXPORT] → HIVE → METRICS
  *
- * Mejoras v4 sobre v3:
- *   - Declarativo: ~20 líneas de definición de tasks vs ~190 imperativas
- *   - DagExecutor con errores tipados (Transient/Fatal/Skippable)
- *   - NonFatal guards (no captura OOM/StackOverflow)
- *   - Checkpoint con metadatos JSON
- *   - TableRegistry como fuente única de tablas
- *   - Tasks no-críticas (critical=false) no bloquean dependientes
+ * Modos de ejecución (auto-detectados):
+ *   1. IBM Analytics Engine Serverless (Spark 3.5 + IBM COS)
+ *   2. HDFS + Hive Lakehouse
+ *   3. Local filesystem
  *
  * Ejecutar:
- *   sbt "runMain medallion.Pipeline"
+ *   sbt "runMain medallion.Pipeline"                         # auto-detect
+ *   AE_INSTANCE_ID=xxx AE_API_KEY=yyy sbt "runMain medallion.Pipeline"  # force AE
  */
 object Pipeline {
 
@@ -42,8 +41,8 @@ object Pipeline {
     MetricsWorkflow.startPipeline()
 
     println("╔══════════════════════════════════════════════════════════════╗")
-    println("║        PIPELINE ORCHESTRATOR v4.0 — Data Engineering        ║")
-    println("║        Declarative DAG | Typed Errors | Checkpoint          ║")
+    println("║        PIPELINE ORCHESTRATOR v6.0 — Data Engineering        ║")
+    println("║  Declarative DAG | COS Upload | ETL | Db2 Export | CI/CD    ║")
     println("╚══════════════════════════════════════════════════════════════╝")
     println()
 
@@ -51,34 +50,61 @@ object Pipeline {
     val localCsvPath = sys.env.getOrElse("CSV_PATH",
       new java.io.File("./src/main/resources/csv").getCanonicalPath)
 
-    val useLocal = !HdfsManager.isAvailable(hdfsUriRoot)
+    // ════════════════════════════════════════════════════════
+    // DETECCIÓN DE MODO: AE > HDFS > LOCAL
+    // ════════════════════════════════════════════════════════
+    val executionMode = IbmCloudConfig.resolveExecutionMode(hdfsUriRoot)
+
+    println(s">>> Modo detectado: $executionMode")
+    println()
 
     // ════════════════════════════════════════════════════════
     // SETUP: Inicializar datalake según entorno
     // ════════════════════════════════════════════════════════
-    val config = if (useLocal) {
-      println(">>> Modo LOCAL — HDFS no disponible")
-      EtlWorkflow.initLocalDatalake("./datalake", localCsvPath)
-    } else {
-      println(">>> Modo HDFS + Hive Lakehouse")
-      val hadoopConfig = EtlWorkflow.setupHadoopEnvironment(hdfsUriRoot)
-      EtlWorkflow.ingestRawData(hdfsUriRoot, localCsvPath)
-      EtlWorkflow.initHdfsDatalake(hdfsUriRoot, hadoopConfig)
+    val config = executionMode match {
+      case IbmAnalyticsEngine =>
+        initCosDataLake(localCsvPath)
+
+      case HdfsCluster =>
+        println(">>> Modo HDFS + Hive Lakehouse")
+        val hadoopConfig = EtlWorkflow.setupHadoopEnvironment(hdfsUriRoot)
+        EtlWorkflow.ingestRawData(hdfsUriRoot, localCsvPath)
+        EtlWorkflow.initHdfsDatalake(hdfsUriRoot, hadoopConfig)
+
+      case LocalMode =>
+        println(">>> Modo LOCAL — HDFS no disponible, AE no configurado")
+        EtlWorkflow.initLocalDatalake("./datalake", localCsvPath)
     }
 
-    val spark = SparkFactory.getOrCreate(useLocal)
+    val spark = SparkFactory.getOrCreate(executionMode)
 
     try {
       // ══════════════════════════════════════════════════════
       // DECLARACIÓN DEL DAG
-      // Cada task declara sus dependencias; el DagExecutor
-      // resuelve la ejecución óptima automáticamente.
       // ══════════════════════════════════════════════════════
       val totalTables = TableRegistry.totalTables
 
       val dagTasks = Seq(
-        // WF1: ETL Pipeline (sin dependencias)
-        DagTask.fromUnit("ETL", Set.empty, () => {
+        // WF0: COS Upload — Carga inicial de CSV locales al bucket raw
+        // NOTA: En modo AE los archivos CSV deben subirse al bucket ANTES
+        //       de ejecutar el pipeline (ver submit-to-ae.sh upload_csv_data).
+        //       Este task solo aplica en modo local/dev con ibmcloud CLI disponible.
+        DagTask.fromUnit("COS_UPLOAD", Set.empty, () => {
+          if (config.cosEnabled && executionMode != IbmAnalyticsEngine) {
+            MetricsWorkflow.startStage("COS_UPLOAD")
+            val cos = IbmCloudConfig.loadCosConfig()
+            val uploaded = CosUploadWorkflow.uploadMissingFiles(localCsvPath, cos.bucketRaw)
+            println(s"  📦 COS Upload: $uploaded archivos nuevos subidos a ${cos.bucketRaw}")
+            MetricsWorkflow.endStage("COS_UPLOAD", uploaded)
+          } else if (executionMode == IbmAnalyticsEngine) {
+            println("  ⏭ COS Upload: modo AE — datos pre-cargados via submit-to-ae.sh")
+          } else {
+            println("  ⏭ COS Upload: modo local — skip")
+          }
+        }, critical = false, description = "Carga inicial CSV → COS datalake-raw"),
+
+        // WF1: ETL Pipeline (depende de COS_UPLOAD si COS está habilitado)
+        DagTask.fromUnit("ETL", Set("COS_UPLOAD"), () => {
           MetricsWorkflow.startStage("ETL")
           EtlWorkflow.run(spark, config)
           MetricsWorkflow.endStage("ETL", totalTables)
@@ -115,6 +141,17 @@ object Pipeline {
           MetricsWorkflow.endStage("ANALYTICS", 10)
         }, critical = false, description = "Generación de gráficos BI"),
 
+        // WF-DB2: Exportar Gold → Db2 on Cloud (después de ETL, no-crítico)
+        DagTask.fromUnit("DB2_EXPORT", Set("ETL"), () => {
+          if (config.db2Enabled) {
+            MetricsWorkflow.startStage("DB2_EXPORT")
+            val exported = Db2ExportWorkflow.run(spark, config)
+            MetricsWorkflow.endStage("DB2_EXPORT", exported)
+          } else {
+            println("  ⏭ Db2 Export: no configurado — skip")
+          }
+        }, critical = false, description = "Gold → Db2 on Cloud (JDBC bulk insert)"),
+
         // WF3: Hive Audit (después de Quality+Lineage, solo si HDFS)
         DagTask(
           id = "HIVE_AUDIT",
@@ -122,8 +159,9 @@ object Pipeline {
           execute = () => {
             if (config.hiveEnabled) {
               MetricsWorkflow.startStage("HIVE_AUDIT")
-              val basePath = s"$hdfsUriRoot/hive/warehouse/datalake"
-              HiveWorkflow.run(spark, basePath, hdfsUriRoot)
+              val hdfsUriForHive = sys.env.getOrElse("HDFS_URI", "hdfs://namenode:9000")
+              val basePath = s"$hdfsUriForHive/hive/warehouse/datalake"
+              HiveWorkflow.run(spark, basePath, hdfsUriForHive)
               MetricsWorkflow.endStage("HIVE_AUDIT", TableRegistry.goldNames.length + TableRegistry.silverNames.length)
             }
             Right(())
@@ -135,7 +173,7 @@ object Pipeline {
         // WF6: Metrics Report (barrera final — depende de todo)
         DagTask(
           id = "METRICS",
-          dependencies = Set("QUALITY", "LINEAGE", "ANALYTICS", "HIVE_AUDIT"),
+          dependencies = Set("QUALITY", "LINEAGE", "ANALYTICS", "DB2_EXPORT", "HIVE_AUDIT"),
           execute = () => {
             MetricsWorkflow.generateReport()
             if (config.metricsPath.nonEmpty) MetricsWorkflow.exportMetrics(config.metricsPath)
@@ -150,7 +188,7 @@ object Pipeline {
       // ══════════════════════════════════════════════════════
       val executor = new DagExecutor(
         tasks = dagTasks,
-        parallelism = 3,  // Quality || Lineage || Analytics en paralelo
+        parallelism = 4,  // Quality || Lineage || Analytics || Db2Export en paralelo
         checkpointPath = config.checkpointPath
       )
 
@@ -160,11 +198,13 @@ object Pipeline {
       // RESUMEN FINAL
       // ══════════════════════════════════════════════════════
       println("╔══════════════════════════════════════════════════════════════╗")
-      println("║              ORCHESTRATOR v4.0 COMPLETADO                   ║")
+      println("║              ORCHESTRATOR v6.0 COMPLETADO                   ║")
       println("╠══════════════════════════════════════════════════════════════╣")
-      println(s"║  Modo: ${if (useLocal) "LOCAL" else "HDFS + Hive"}")
-      println(s"║  DAG: ${dagTasks.length} tasks, parallelism=3")
+      println(s"║  Modo: $executionMode")
+      println(s"║  DAG: ${dagTasks.length} tasks, parallelism=4")
       println(s"║  Checkpoint: ${if (config.checkpointPath.nonEmpty) config.checkpointPath else "disabled"}")
+      println(s"║  COS: ${if (config.cosEnabled) "✔ IBM Cloud Object Storage" else "✗"}")
+      println(s"║  Db2: ${if (config.db2Enabled) "✔ Gold → Db2 on Cloud" else "✗ no configurado"}")
       println(s"║  Tablas: Bronze=${TableRegistry.bronzeNames.length} Silver=${TableRegistry.silverNames.length} Gold=${TableRegistry.goldNames.length}")
       println("╚══════════════════════════════════════════════════════════════╝")
 
@@ -175,5 +215,40 @@ object Pipeline {
     } finally {
       spark.stop()
     }
+  }
+
+  /**
+   * Inicializa DatalakeConfig para IBM COS (S3A).
+   * Los datos RAW ya están en el bucket COS; no se copian localmente.
+   */
+  private def initCosDataLake(localCsvPath: String): DatalakeConfig = {
+    val cos = IbmCloudConfig.loadCosConfig()
+    println(s">>> IBM COS — RAW: ${cos.bucketRaw}  Bronze: ${cos.bucketBronze}")
+    println(s">>> IBM COS — Silver: ${cos.bucketSilver}  Gold: ${cos.bucketGold}")
+    println(s">>> IBM COS — Endpoint: ${cos.endpoint}")
+
+    val db2 = Db2Config.fromEnv()
+    if (db2.isDefined) println(s">>> Db2 on Cloud — Configurado (${db2.get.hostname})")
+    else println(">>> Db2 on Cloud — No configurado (exportación deshabilitada)")
+
+    // En AE Serverless, usar /tmp para escritura local efímera
+    val chartsDir  = "/tmp/analytics-charts"
+    val checkpointDir = "/tmp/dag-checkpoints"
+    new java.io.File(chartsDir).mkdirs()
+    new java.io.File(checkpointDir).mkdirs()
+
+    DatalakeConfig(
+      rawPath        = cos.rawBase,
+      bronzePath     = cos.bronzeBase,
+      silverPath     = cos.silverBase,
+      goldPath       = cos.goldBase,
+      chartsPath     = chartsDir,
+      lineagePath    = s"${cos.goldBase}/lineage",
+      metricsPath    = s"${cos.goldBase}/metrics",
+      checkpointPath = checkpointDir,
+      cosEnabled     = true,
+      db2Enabled     = db2.isDefined,
+      db2Config      = db2
+    )
   }
 }
