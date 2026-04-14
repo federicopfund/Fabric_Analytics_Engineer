@@ -1,0 +1,187 @@
+# ═══════════════════════════════════════════════════════════════
+# ConfigMap — Configuración de Spark y del pipeline
+# ═══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spark-config
+  namespace: spark-medallion
+  labels:
+    app.kubernetes.io/component: config
+    app.kubernetes.io/part-of: medallion-pipeline
+data:
+  # ── Spark Core ──
+  SPARK_MASTER: "k8s://https://kubernetes.default.svc:443"
+  SPARK_APP_NAME: "BatchETL-Medallion-v6-K8s"
+  SPARK_MAIN_CLASS: "medallion.Pipeline"
+  SPARK_DRIVER_MEMORY: "2g"
+  SPARK_EXECUTOR_MEMORY: "4g"
+  SPARK_EXECUTOR_CORES: "2"
+  SPARK_NUM_EXECUTORS: "3"
+  SPARK_DYNAMIC_ALLOCATION: "true"
+  SPARK_SHUFFLE_PARTITIONS: "200"
+
+  # ── COS Buckets ──
+  COS_BUCKET_RAW: "datalake-raw-us-south-dev"
+  COS_BUCKET_BRONZE: "datalake-bronze-us-south-dev"
+  COS_BUCKET_SILVER: "datalake-silver-us-south-dev"
+  COS_BUCKET_GOLD: "datalake-gold-us-south-dev"
+
+  # ── JAR Location ──
+  JAR_COS_KEY: "spark-jars/root-assembly-2.0.0.jar"
+  JAR_LOCAL_PATH: "/opt/spark/work/root-assembly-2.0.0.jar"
+
+  # ── Pipeline ──
+  PIPELINE_MODE: "K8S"
+  PIPELINE_LOG_LEVEL: "INFO"
+  PIPELINE_RETRY_MAX: "3"
+  PIPELINE_RETRY_DELAY_MS: "5000"
+
+  # ── Delta Lake ──
+  DELTA_EXTENSIONS: "io.delta.sql.DeltaSparkSessionExtension"
+  DELTA_CATALOG: "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+
+  # ── spark-defaults.conf (montado en driver/executor) ──
+  spark-defaults.conf: |
+    spark.master                                    k8s://https://kubernetes.default.svc:443
+    spark.kubernetes.namespace                       spark-medallion
+    spark.kubernetes.authenticate.driver.serviceAccountName  spark-driver
+    spark.kubernetes.container.image                 us.icr.io/medallion/spark-medallion:latest
+    spark.kubernetes.container.image.pullPolicy       IfNotPresent
+
+    # ── Resources ──
+    spark.driver.memory                              2g
+    spark.driver.cores                               1
+    spark.executor.memory                            4g
+    spark.executor.cores                             2
+    spark.executor.instances                         3
+    spark.dynamicAllocation.enabled                  true
+    spark.dynamicAllocation.minExecutors             1
+    spark.dynamicAllocation.maxExecutors             6
+    spark.dynamicAllocation.executorIdleTimeout      60s
+    spark.dynamicAllocation.shuffleTracking.enabled   true
+
+    # ── S3A / COS ──
+    spark.hadoop.fs.s3a.impl                         org.apache.hadoop.fs.s3a.S3AFileSystem
+    spark.hadoop.fs.s3a.path.style.access            true
+    spark.hadoop.fs.s3a.connection.ssl.enabled        true
+    spark.hadoop.fs.s3a.fast.upload                  true
+    spark.hadoop.fs.s3a.fast.upload.buffer           bytebuffer
+    spark.hadoop.fs.s3a.multipart.size               67108864
+    spark.hadoop.fs.s3a.connection.maximum            200
+
+    # ── Delta Lake ──
+    spark.sql.extensions                              io.delta.sql.DeltaSparkSessionExtension
+    spark.sql.catalog.spark_catalog                   org.apache.spark.sql.delta.catalog.DeltaCatalog
+    spark.databricks.delta.retentionDurationCheck.enabled  false
+
+    # ── Performance ──
+    spark.sql.shuffle.partitions                     200
+    spark.sql.adaptive.enabled                       true
+    spark.sql.adaptive.coalescePartitions.enabled     true
+    spark.serializer                                  org.apache.spark.serializer.KryoSerializer
+    spark.kryoserializer.buffer.max                  256m
+    spark.network.timeout                             600s
+    spark.rpc.askTimeout                              600s
+
+    # ── Fault Tolerance ──
+    spark.task.maxFailures                            4
+    spark.stage.maxConsecutiveAttempts                 4
+    spark.kubernetes.executor.deleteOnTermination      true
+
+    # ── UI / History Server ──
+    spark.eventLog.enabled                            true
+    spark.eventLog.dir                                s3a://datalake-gold-us-south-dev/spark-events/
+    spark.ui.prometheus.enabled                        true
+---
+# ═══════════════════════════════════════════════════════════════
+# ConfigMap — Scripts de pre-flight y health check
+# ═══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spark-scripts
+  namespace: spark-medallion
+  labels:
+    app.kubernetes.io/component: scripts
+    app.kubernetes.io/part-of: medallion-pipeline
+data:
+  # ── Pre-flight: descarga JAR de COS y valida conectividad ──
+  preflight.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    echo "╔══════════════════════════════════════════════╗"
+    echo "║   Pre-flight Checks — Medallion Pipeline     ║"
+    echo "╚══════════════════════════════════════════════╝"
+
+    # 1. Descargar JAR desde COS
+    echo "[1/4] Downloading JAR from COS..."
+    JAR_URL="https://${COS_ENDPOINT}/${COS_BUCKET_RAW}/../${JAR_COS_KEY}"
+    aws s3 cp "s3://${COS_BUCKET_RAW%%-raw*}-raw-us-south-dev/${JAR_COS_KEY}" \
+      "${JAR_LOCAL_PATH}" \
+      --endpoint-url "https://${COS_ENDPOINT}" \
+      --no-sign-request 2>/dev/null || \
+    curl -sSf -o "${JAR_LOCAL_PATH}" \
+      -H "Authorization: Bearer ${IAM_TOKEN}" \
+      "https://${COS_ENDPOINT}/${COS_BUCKET_RAW}/${JAR_COS_KEY}" || {
+        echo "ERROR: Failed to download JAR"
+        exit 1
+    }
+    echo "  ✓ JAR downloaded ($(du -h ${JAR_LOCAL_PATH} | awk '{print $1}'))"
+
+    # 2. Validar JAR
+    echo "[2/4] Validating JAR..."
+    jar tf "${JAR_LOCAL_PATH}" | grep -q "medallion/Pipeline" || {
+      echo "ERROR: JAR does not contain medallion.Pipeline"
+      exit 1
+    }
+    echo "  ✓ Main class found: medallion.Pipeline"
+
+    # 3. Test COS connectivity
+    echo "[3/4] Testing COS connectivity..."
+    aws s3 ls "s3://${COS_BUCKET_RAW}/" \
+      --endpoint-url "https://${COS_ENDPOINT}" \
+      --no-sign-request 2>/dev/null && echo "  ✓ COS RAW accessible" || \
+      echo "  ⚠ COS check skipped (will use Spark S3A config)"
+
+    # 4. Test Db2 connectivity (optional)
+    echo "[4/4] Testing Db2 connectivity..."
+    timeout 5 bash -c "echo > /dev/tcp/${DB2_HOSTNAME}/${DB2_PORT}" 2>/dev/null && \
+      echo "  ✓ Db2 reachable at ${DB2_HOSTNAME}:${DB2_PORT}" || \
+      echo "  ⚠ Db2 not reachable (export will be skipped)"
+
+    echo ""
+    echo "✔ Pre-flight complete. Starting Spark..."
+
+  # ── Health check endpoint ──
+  healthcheck.sh: |
+    #!/bin/bash
+    # Liveness: verifica que el proceso Spark driver esté corriendo
+    pgrep -f "spark.driver" > /dev/null 2>&1 || \
+    pgrep -f "medallion.Pipeline" > /dev/null 2>&1
+
+  # ── Post-run: cleanup y notificación ──
+  postrun.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    EXIT_CODE=${1:-0}
+    TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    echo "╔══════════════════════════════════════════════╗"
+    echo "║   Post-run — Medallion Pipeline              ║"
+    echo "╚══════════════════════════════════════════════╝"
+    echo "Exit code: ${EXIT_CODE}"
+    echo "Timestamp: ${TIMESTAMP}"
+
+    # Cleanup tmp files
+    rm -rf /tmp/spark-* /tmp/hsperfdata_* 2>/dev/null || true
+
+    if [ "${EXIT_CODE}" -ne 0 ]; then
+      echo "::error::Pipeline failed with exit code ${EXIT_CODE}"
+    else
+      echo "✔ Pipeline completed successfully"
+    fi
+
+    exit ${EXIT_CODE}
