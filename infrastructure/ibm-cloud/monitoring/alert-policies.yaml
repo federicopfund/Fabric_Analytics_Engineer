@@ -1,0 +1,125 @@
+# ═══════════════════════════════════════════════════════════════
+# IBM Cloud Monitoring — Alert Policies
+# ═══════════════════════════════════════════════════════════════
+# Apply via Sysdig Monitor API or IBM Cloud Monitoring console.
+# These define alerting rules for the Medallion pipeline.
+# ═══════════════════════════════════════════════════════════════
+
+policies:
+  # ── Spark Application Failures ──
+  - name: "Spark App Failed"
+    description: "Analytics Engine Spark application failed"
+    severity: critical
+    condition:
+      type: metric
+      metric: ibm_analytics_engine.spark_app.state
+      operator: equals
+      value: "failed"
+      duration: 0m
+    notification:
+      channels: [slack, email]
+    labels:
+      service: analytics-engine
+      environment: "{{environment}}"
+
+  # ── COS Bucket Access Denied ──
+  - name: "COS Access Denied"
+    description: "Unauthorized access attempt to COS bucket"
+    severity: high
+    condition:
+      type: event
+      source: activity-tracker
+      filter: "action:cloud-object-storage.object.read AND outcome:failure"
+      threshold: 5
+      duration: 5m
+    notification:
+      channels: [slack]
+    labels:
+      service: cloud-object-storage
+
+  # ── COS Bucket Size Threshold ──
+  - name: "COS Gold Bucket Large"
+    description: "Gold bucket exceeds 10GB"
+    severity: warning
+    condition:
+      type: metric
+      metric: ibm_cos.bucket.bytes_used
+      operator: greater_than
+      value: 10737418240  # 10 GB
+      duration: 0m
+      filter:
+        bucket_name: "datalake-gold-*"
+    notification:
+      channels: [email]
+
+  # ── Db2 Connection Failures ──
+  - name: "Db2 Connection Error"
+    description: "Db2 database connection failures detected"
+    severity: high
+    condition:
+      type: metric
+      metric: ibm_db2.connections.failed
+      operator: greater_than
+      value: 3
+      duration: 5m
+    notification:
+      channels: [slack, email]
+    labels:
+      service: db2
+
+  # ── IKS Node Not Ready ──
+  - name: "IKS Node Not Ready"
+    description: "Kubernetes worker node not in Ready state"
+    severity: critical
+    condition:
+      type: metric
+      metric: kubernetes.node.status.ready
+      operator: equals
+      value: 0
+      duration: 5m
+    notification:
+      channels: [slack, email]
+    labels:
+      service: iks
+
+  # ── Pipeline Duration SLA ──
+  - name: "Pipeline Exceeds SLA"
+    description: "Spark pipeline exceeds 10 minute SLA"
+    severity: warning
+    condition:
+      type: metric
+      metric: ibm_analytics_engine.spark_app.duration_seconds
+      operator: greater_than
+      value: 600
+      duration: 0m
+    notification:
+      channels: [slack]
+    labels:
+      service: analytics-engine
+
+  # ── Credential Expiry ──
+  - name: "Service Key Expiring"
+    description: "IBM Cloud service key expiring within 7 days"
+    severity: warning
+    condition:
+      type: event
+      source: activity-tracker
+      filter: "action:iam-identity.serviceid-apikey.create"
+      threshold: 0
+      duration: 168h  # 7 days
+    notification:
+      channels: [email]
+
+notification_channels:
+  slack:
+    type: webhook
+    url: "${SLACK_WEBHOOK_URL}"
+    template: |
+      {
+        "text": ":alert: *{{policy_name}}*\n{{description}}\nSeverity: {{severity}}\nTime: {{timestamp}}"
+      }
+
+  email:
+    type: email
+    recipients:
+      - "${ALERT_EMAIL}"
