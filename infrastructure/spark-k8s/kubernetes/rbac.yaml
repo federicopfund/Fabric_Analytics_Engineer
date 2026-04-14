@@ -18,6 +18,9 @@ kind: Role
 metadata:
   name: spark-driver-role
   namespace: spark-medallion
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/part-of: medallion-pipeline
 rules:
   # Crear/eliminar executor pods
   - apiGroups: [""]
@@ -45,6 +48,9 @@ kind: RoleBinding
 metadata:
   name: spark-driver-binding
   namespace: spark-medallion
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/part-of: medallion-pipeline
 subjects:
   - kind: ServiceAccount
     name: spark-driver
@@ -62,6 +68,9 @@ kind: ResourceQuota
 metadata:
   name: spark-medallion-quota
   namespace: spark-medallion
+  labels:
+    app.kubernetes.io/component: quota
+    app.kubernetes.io/part-of: medallion-pipeline
 spec:
   hard:
     requests.cpu: "8"
@@ -79,6 +88,9 @@ kind: LimitRange
 metadata:
   name: spark-limits
   namespace: spark-medallion
+  labels:
+    app.kubernetes.io/component: limits
+    app.kubernetes.io/part-of: medallion-pipeline
 spec:
   limits:
     - type: Container

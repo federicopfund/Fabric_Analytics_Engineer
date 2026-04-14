@@ -10,6 +10,7 @@ metadata:
   namespace: spark-medallion
   labels:
     app: spark-medallion
+    app.kubernetes.io/part-of: medallion-pipeline
     component: monitoring
     release: prometheus          # <- label que usa kube-prometheus-stack
 spec:
@@ -38,6 +39,7 @@ metadata:
   namespace: spark-medallion
   labels:
     app: spark-medallion
+    app.kubernetes.io/part-of: medallion-pipeline
     component: monitoring
     release: prometheus
 spec:
@@ -65,6 +67,7 @@ metadata:
   namespace: spark-medallion
   labels:
     app: spark-medallion
+    app.kubernetes.io/part-of: medallion-pipeline
     component: monitoring
     release: prometheus
 spec:
