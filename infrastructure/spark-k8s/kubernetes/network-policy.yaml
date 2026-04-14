@@ -1,0 +1,131 @@
+# ═══════════════════════════════════════════════════════════════
+# NetworkPolicy — Zero-trust networking para Spark pods
+#
+# Reglas:
+#   1. Driver puede crear executors (egress a API server)
+#   2. Executors solo hablan con driver (ingress/egress restringido)
+#   3. Driver accede a COS (HTTPS) y Db2 (TCP 30376)
+#   4. Todo lo demás: DENY
+# ═══════════════════════════════════════════════════════════════
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spark-driver-policy
+  namespace: spark-medallion
+  labels:
+    app.kubernetes.io/component: network
+    app.kubernetes.io/part-of: medallion-pipeline
+spec:
+  podSelector:
+    matchLabels:
+      spark-role: driver
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Permitir tráfico de executors → driver (RPC + block manager)
+    - from:
+        - podSelector:
+            matchLabels:
+              spark-role: executor
+      ports:
+        - port: 7078
+          protocol: TCP
+        - port: 7079
+          protocol: TCP
+    # Permitir acceso a Spark UI (monitoring)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 4040
+          protocol: TCP
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # K8s API server (crear executor pods)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: 443
+          protocol: TCP
+    # COS (S3A — HTTPS)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: 443
+          protocol: TCP
+    # Db2 on Cloud
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: 30376
+          protocol: TCP
+    # Executor pods (RPC)
+    - to:
+        - podSelector:
+            matchLabels:
+              spark-role: executor
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spark-executor-policy
+  namespace: spark-medallion
+  labels:
+    app.kubernetes.io/component: network
+    app.kubernetes.io/part-of: medallion-pipeline
+spec:
+  podSelector:
+    matchLabels:
+      spark-role: executor
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Solo driver → executor
+    - from:
+        - podSelector:
+            matchLabels:
+              spark-role: driver
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Driver (RPC + block manager)
+    - to:
+        - podSelector:
+            matchLabels:
+              spark-role: driver
+      ports:
+        - port: 7078
+          protocol: TCP
+        - port: 7079
+          protocol: TCP
+    # COS (S3A)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: 443
+          protocol: TCP
+    # Executor↔Executor shuffle
+    - to:
+        - podSelector:
+            matchLabels:
+              spark-role: executor
