@@ -1,0 +1,175 @@
+# ═══════════════════════════════════════════════════════════════
+# Prometheus ServiceMonitor + PrometheusRule — Spark Medallion
+# ═══════════════════════════════════════════════════════════════
+# Requiere: prometheus-operator (kube-prometheus-stack)
+# ═══════════════════════════════════════════════════════════════
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: spark-driver-monitor
+  namespace: spark-medallion
+  labels:
+    app: spark-medallion
+    component: monitoring
+    release: prometheus          # <- label que usa kube-prometheus-stack
+spec:
+  jobLabel: spark-medallion
+  selector:
+    matchLabels:
+      app: spark-medallion
+      component: driver
+  namespaceSelector:
+    matchNames:
+      - spark-medallion
+  endpoints:
+    - port: spark-ui
+      path: /metrics/prometheus/
+      interval: 30s
+      scrapeTimeout: 10s
+      honorLabels: true
+---
+# ═══════════════════════════════════════════════════════════════
+# PodMonitor — Spark Executors (no tienen Service propio)
+# ═══════════════════════════════════════════════════════════════
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: spark-executor-monitor
+  namespace: spark-medallion
+  labels:
+    app: spark-medallion
+    component: monitoring
+    release: prometheus
+spec:
+  jobLabel: spark-executor
+  selector:
+    matchLabels:
+      app: spark-medallion
+      component: executor
+  namespaceSelector:
+    matchNames:
+      - spark-medallion
+  podMetricsEndpoints:
+    - port: spark-ui
+      path: /metrics/prometheus/
+      interval: 30s
+      scrapeTimeout: 10s
+---
+# ═══════════════════════════════════════════════════════════════
+# PrometheusRule — Alertas del Pipeline
+# ═══════════════════════════════════════════════════════════════
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: spark-medallion-alerts
+  namespace: spark-medallion
+  labels:
+    app: spark-medallion
+    component: monitoring
+    release: prometheus
+spec:
+  groups:
+    # ── Job Health ──
+    - name: spark-medallion.job-health
+      interval: 60s
+      rules:
+        - alert: SparkJobFailed
+          expr: |
+            kube_job_status_failed{namespace="spark-medallion", job_name=~"spark-medallion-pipeline-.*"} > 0
+          for: 0m
+          labels:
+            severity: critical
+            team: data-engineering
+          annotations:
+            summary: "Spark Medallion pipeline job failed"
+            description: "Job {{ $labels.job_name }} failed at {{ $value }} attempt(s)."
+            runbook_url: "https://github.com/fpfund/data-engineer/wiki/runbook-spark-job-failed"
+
+        - alert: SparkJobStuck
+          expr: |
+            time() - kube_job_status_start_time{namespace="spark-medallion", job_name=~"spark-medallion-pipeline-.*"} > 7200
+            and kube_job_status_active{namespace="spark-medallion", job_name=~"spark-medallion-pipeline-.*"} > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: data-engineering
+          annotations:
+            summary: "Spark job running longer than 2 hours"
+            description: "Job {{ $labels.job_name }} has been running for over 2h."
+
+        - alert: SparkCronJobMissed
+          expr: |
+            time() - kube_cronjob_status_last_schedule_time{namespace="spark-medallion", cronjob="spark-medallion-pipeline"} > 7200
+          for: 10m
+          labels:
+            severity: warning
+            team: data-engineering
+          annotations:
+            summary: "CronJob missed its scheduled execution"
+            description: "CronJob spark-medallion-pipeline hasn't been scheduled for over 2h."
+
+    # ── Resource Pressure ──
+    - name: spark-medallion.resources
+      interval: 60s
+      rules:
+        - alert: SparkDriverOOMRisk
+          expr: |
+            container_memory_working_set_bytes{namespace="spark-medallion", container="spark-driver"}
+            / container_spec_memory_limit_bytes{namespace="spark-medallion", container="spark-driver"} > 0.85
+          for: 3m
+          labels:
+            severity: warning
+            team: data-engineering
+          annotations:
+            summary: "Spark driver memory usage > 85%"
+            description: "Driver pod {{ $labels.pod }} is at {{ $value | humanizePercentage }} memory utilization."
+
+        - alert: SparkExecutorOOMRisk
+          expr: |
+            container_memory_working_set_bytes{namespace="spark-medallion", container=~"spark-kubernetes-executor.*"}
+            / container_spec_memory_limit_bytes{namespace="spark-medallion", container=~"spark-kubernetes-executor.*"} > 0.90
+          for: 2m
+          labels:
+            severity: warning
+            team: data-engineering
+          annotations:
+            summary: "Spark executor memory usage > 90%"
+            description: "Executor {{ $labels.pod }} at {{ $value | humanizePercentage }} memory."
+
+        - alert: SparkNamespaceQuotaNearLimit
+          expr: |
+            kube_resourcequota{namespace="spark-medallion", type="used"}
+            / kube_resourcequota{namespace="spark-medallion", type="hard"} > 0.80
+          for: 5m
+          labels:
+            severity: info
+            team: data-engineering
+          annotations:
+            summary: "Namespace quota approaching limit"
+            description: "Resource {{ $labels.resource }} at {{ $value | humanizePercentage }} of quota."
+
+    # ── Pod Disruptions ──
+    - name: spark-medallion.pods
+      interval: 30s
+      rules:
+        - alert: SparkPodCrashLooping
+          expr: |
+            rate(kube_pod_container_status_restarts_total{namespace="spark-medallion"}[10m]) * 60 > 2
+          for: 5m
+          labels:
+            severity: critical
+            team: data-engineering
+          annotations:
+            summary: "Pod crash-looping in spark-medallion namespace"
+            description: "Pod {{ $labels.pod }} container {{ $labels.container }} restarting {{ $value }} times/min."
+
+        - alert: SparkPodPending
+          expr: |
+            kube_pod_status_phase{namespace="spark-medallion", phase="Pending"} == 1
+          for: 10m
+          labels:
+            severity: warning
+            team: data-engineering
+          annotations:
+            summary: "Pod stuck in Pending state"
+            description: "Pod {{ $labels.pod }} has been Pending for > 10 min. Check node resources or taints."
