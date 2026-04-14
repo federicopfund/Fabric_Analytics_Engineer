@@ -1,0 +1,202 @@
+# ═══════════════════════════════════════════════════════════════
+# Tekton Triggers — GitHub Webhook → Pipeline Execution
+# ═══════════════════════════════════════════════════════════════
+
+# ── TriggerTemplate: Production (push to main) ──
+apiVersion: tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: medallion-pipeline-trigger
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+spec:
+  params:
+    - name: git-url
+    - name: git-branch
+    - name: ae-instance-id
+      default: ""
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1beta1
+      kind: PipelineRun
+      metadata:
+        generateName: medallion-run-
+        labels:
+          app.kubernetes.io/part-of: medallion-pipeline
+          tekton.dev/pipeline: medallion-data-pipeline
+      spec:
+        pipelineRef:
+          name: medallion-data-pipeline
+        params:
+          - name: git-url
+            value: $(tt.params.git-url)
+          - name: git-branch
+            value: $(tt.params.git-branch)
+          - name: ae-instance-id
+            value: $(tt.params.ae-instance-id)
+        workspaces:
+          - name: source
+            volumeClaimTemplate:
+              spec:
+                accessModes: [ReadWriteOnce]
+                resources:
+                  requests:
+                    storage: 2Gi
+          - name: credentials
+            secret:
+              secretName: ibmcloud-credentials
+        timeout: "30m"
+
+---
+# ── TriggerTemplate: PR Validation (tests + scan only) ──
+apiVersion: tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: medallion-pr-trigger
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+spec:
+  params:
+    - name: git-url
+    - name: git-branch
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1beta1
+      kind: PipelineRun
+      metadata:
+        generateName: medallion-pr-
+        labels:
+          app.kubernetes.io/part-of: medallion-pipeline
+          tekton.dev/trigger: pull-request
+      spec:
+        pipelineRef:
+          name: medallion-data-pipeline
+        params:
+          - name: git-url
+            value: $(tt.params.git-url)
+          - name: git-branch
+            value: $(tt.params.git-branch)
+          - name: deploy-target
+            value: "none"
+        workspaces:
+          - name: source
+            volumeClaimTemplate:
+              spec:
+                accessModes: [ReadWriteOnce]
+                resources:
+                  requests:
+                    storage: 2Gi
+          - name: credentials
+            secret:
+              secretName: ibmcloud-credentials
+        timeout: "15m"
+
+---
+# ── TriggerBinding: Push events ──
+apiVersion: tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: github-push-binding
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+spec:
+  params:
+    - name: git-url
+      value: $(body.repository.clone_url)
+    - name: git-branch
+      value: $(body.ref)
+
+---
+# ── TriggerBinding: Pull Request events ──
+apiVersion: tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: github-pr-binding
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+spec:
+  params:
+    - name: git-url
+      value: $(body.pull_request.head.repo.clone_url)
+    - name: git-branch
+      value: $(body.pull_request.head.ref)
+
+---
+# ── EventListener: GitHub Webhooks ──
+apiVersion: tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: github-listener
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+spec:
+  serviceAccountName: tekton-triggers-sa
+  triggers:
+    # Push to main → full pipeline (test + build + deploy)
+    - name: github-push-main
+      interceptors:
+        - ref:
+            name: "cel"
+          params:
+            - name: "filter"
+              value: "body.ref == 'refs/heads/main'"
+      bindings:
+        - ref: github-push-binding
+      template:
+        ref: medallion-pipeline-trigger
+
+    # Pull Request → validation only (test + security scan)
+    - name: github-pull-request
+      interceptors:
+        - ref:
+            name: "cel"
+          params:
+            - name: "filter"
+              value: "body.action in ['opened', 'synchronize']"
+      bindings:
+        - ref: github-pr-binding
+      template:
+        ref: medallion-pr-trigger
+
+---
+# ── ServiceAccount for Triggers ──
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tekton-triggers-sa
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+
+---
+# ── RBAC: Allow EventListener to create PipelineRuns ──
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tekton-triggers-binding
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+subjects:
+  - kind: ServiceAccount
+    name: tekton-triggers-sa
+    namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tekton-triggers-eventlistener-roles
+
+---
+# ── Secret Template: IBM Cloud Credentials ──
+# Create this manually before deploying:
+#   kubectl create secret generic ibmcloud-credentials \
+#     --from-file=apikey=<path-to-apikey-file> \
+#     --from-literal=cos-access-key=<COS_ACCESS_KEY> \
+#     --from-literal=cos-secret-key=<COS_SECRET_KEY>
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ibmcloud-credentials
+  labels:
+    app.kubernetes.io/part-of: medallion-pipeline
+type: Opaque
+stringData:
+  apikey: ""           # IBM Cloud API key
+  cos-access-key: ""   # COS HMAC access key
+  cos-secret-key: ""   # COS HMAC secret key
