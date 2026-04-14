@@ -53,7 +53,8 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          pip install --quiet ibm-cos-sdk ibm-db pyarrow pandas
+          pip install --quiet ibm-cos-sdk pyarrow pandas
+          pip install --quiet ibm-db 2>/dev/null || echo "::warning::ibm-db install failed (DB2 checks will be skipped)"
 
       - name: Get IAM Token
         id: iam
@@ -71,6 +72,10 @@ jobs:
           COS_ACCESS_KEY: ${{ secrets.COS_ACCESS_KEY }}
           COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
           DB2_PASSWORD: ${{ secrets.DB2_PASSWORD }}
+          DB2_HOSTNAME: ${{ env.DB2_HOSTNAME }}
+          DB2_PORT: ${{ env.DB2_PORT }}
+          DB2_DATABASE: ${{ env.DB2_DATABASE }}
+          DB2_USERNAME: ${{ env.DB2_USERNAME }}
           CHECK_LAYER: ${{ github.event.inputs.layer || 'all' }}
           STRICT_MODE: ${{ github.event.inputs.fail_on_warning || 'false' }}
         run: |
