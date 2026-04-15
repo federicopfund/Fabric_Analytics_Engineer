@@ -29,10 +29,10 @@ object CosConfig {
                   sys.env.getOrElse("AWS_SECRET_ACCESS_KEY", "")),
     endpoint    = sys.env.getOrElse("COS_ENDPOINT",
                   "s3.us-south.cloud-object-storage.appdomain.cloud"),
-    bucketRaw   = sys.env.getOrElse("COS_BUCKET_RAW",    "datalake-raw-us-south"),
-    bucketBronze = sys.env.getOrElse("COS_BUCKET_BRONZE", "datalake-bronze-us-south"),
-    bucketSilver = sys.env.getOrElse("COS_BUCKET_SILVER", "datalake-silver-us-south"),
-    bucketGold   = sys.env.getOrElse("COS_BUCKET_GOLD",   "datalake-gold-us-south")
+    bucketRaw   = sys.env.getOrElse("COS_BUCKET_RAW",    "datalake-raw-us-south-dev"),
+    bucketBronze = sys.env.getOrElse("COS_BUCKET_BRONZE", "datalake-bronze-us-south-dev"),
+    bucketSilver = sys.env.getOrElse("COS_BUCKET_SILVER", "datalake-silver-us-south-dev"),
+    bucketGold   = sys.env.getOrElse("COS_BUCKET_GOLD",   "datalake-gold-us-south-dev")
   )
 
   def configureSparkS3A(spark: SparkSession, config: Config): Unit = {

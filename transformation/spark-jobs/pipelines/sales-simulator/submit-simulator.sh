@@ -26,7 +26,9 @@ AE_REGION="${AE_REGION:-us-south}"
 COS_ACCESS_KEY="${COS_ACCESS_KEY:-${AWS_ACCESS_KEY_ID:-}}"
 COS_SECRET_KEY="${COS_SECRET_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
 COS_ENDPOINT="${COS_ENDPOINT:-s3.us-south.cloud-object-storage.appdomain.cloud}"
-COS_BUCKET_RAW="${COS_BUCKET_RAW:-datalake-raw-us-south}"
+
+# Pipeline usa buckets con sufijo -dev (ver datalake-raw-us-south-dev en IBM COS)
+COS_BUCKET_RAW="datalake-raw-us-south-dev"
 
 SCALA_PROJECT_DIR="${SCRIPT_DIR}"
 JAR_NAME="sales-simulator-assembly-1.0.0.jar"
