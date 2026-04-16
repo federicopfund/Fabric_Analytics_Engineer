@@ -34,8 +34,15 @@ import scala.util.control.NonFatal
 class DagExecutor(
   tasks: Seq[DagTask],
   parallelism: Int = 2,
-  checkpointPath: String = ""
+  checkpointPath: String = "",
+  stateStore: PipelineStateStore = null
 ) {
+
+  private val store: PipelineStateStore = {
+    if (stateStore != null) stateStore
+    else if (checkpointPath.nonEmpty) new LocalStateStore(checkpointPath)
+    else NoOpStateStore
+  }
 
   private val logger = Logger.getLogger(getClass.getName)
 
@@ -50,7 +57,7 @@ class DagExecutor(
 
     // Inicializar estados
     tasks.foreach { t =>
-      if (isCheckpointed(t.id)) {
+      if (store.isCompleted(t.id)) {
         statusMap.put(t.id, Skipped)
         logger.info(s"  ⏭ DAG: ${t.id} — checkpoint, skipped")
       } else {
@@ -96,7 +103,8 @@ class DagExecutor(
 
             statusMap.put(task.id, result)
             if (result == Completed || result.isInstanceOf[CompletedWithWarning]) {
-              writeCheckpoint(task.id, durations.getOrDefault(task.id, 0L))
+              val desc = taskMap.get(task.id).map(_.description).getOrElse("")
+              store.markCompleted(task.id, durations.getOrDefault(task.id, 0L), desc)
             }
             val done = completedCount.incrementAndGet()
             logger.info(s"  DAG progress: $done/$totalTasks — ${task.id}: $result")
@@ -188,35 +196,7 @@ class DagExecutor(
     logger.info(s"  ✔ DAG validated: ${tasks.length} tasks, no cycles")
   }
 
-  // ═══════════════════════════════════════════════════
-  // Checkpoint con metadatos JSON
-  // ═══════════════════════════════════════════════════
-
-  private def isCheckpointed(taskId: String): Boolean = {
-    if (checkpointPath.isEmpty) return false
-    new java.io.File(s"$checkpointPath/.dag_$taskId.json").exists() ||
-      new java.io.File(s"$checkpointPath/.dag_$taskId").exists() // backward compat
-  }
-
-  private def writeCheckpoint(taskId: String, durationMs: Long = 0L): Unit = {
-    if (checkpointPath.isEmpty) return
-    val dir = new java.io.File(checkpointPath)
-    if (!dir.exists()) dir.mkdirs()
-
-    val timestamp = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss").format(new java.util.Date())
-    val desc = taskMap.get(taskId).map(_.description).getOrElse("")
-    val json =
-      s"""{
-  "task": "$taskId",
-  "status": "completed",
-  "timestamp": "$timestamp",
-  "duration_ms": $durationMs,
-  "description": "$desc"
-}"""
-
-    val writer = new java.io.PrintWriter(s"$checkpointPath/.dag_$taskId.json")
-    try { writer.write(json) } finally { writer.close() }
-  }
+  // Checkpoint logic delegated to PipelineStateStore
 
   /** Imprime resumen de ejecución del DAG */
   private def printDagReport(): Unit = {

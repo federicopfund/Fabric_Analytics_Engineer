@@ -2,7 +2,7 @@ package medallion
 
 import medallion.config.{DatalakeConfig, Db2Config, IbmCloudConfig, SparkFactory, TableRegistry}
 import medallion.config.IbmCloudConfig.{ExecutionMode, IbmAnalyticsEngine, HdfsCluster, LocalMode}
-import medallion.engine.{DagExecutor, DagTask}
+import medallion.engine.{DagExecutor, DagTask, DistributedStateStore, LocalStateStore, PipelineStateStore}
 import medallion.infra.HdfsManager
 import medallion.workflow._
 import org.apache.log4j.{Logger, PropertyConfigurator}
@@ -186,10 +186,23 @@ object Pipeline {
       // ══════════════════════════════════════════════════════
       // EJECUCIÓN DEL DAG
       // ══════════════════════════════════════════════════════
+      val stateStore: PipelineStateStore = executionMode match {
+        case IbmAnalyticsEngine =>
+          val cos = IbmCloudConfig.loadCosConfig()
+          new DistributedStateStore(spark, s"${cos.goldBase}/pipeline-state")
+        case HdfsCluster =>
+          val hdfsUri = sys.env.getOrElse("HDFS_URI", "hdfs://namenode:9000")
+          new DistributedStateStore(spark, s"$hdfsUri/hive/warehouse/pipeline-state")
+        case LocalMode if config.checkpointPath.nonEmpty =>
+          new LocalStateStore(config.checkpointPath)
+        case _ =>
+          new LocalStateStore(config.checkpointPath)
+      }
+
       val executor = new DagExecutor(
         tasks = dagTasks,
         parallelism = 4,  // Quality || Lineage || Analytics || Db2Export en paralelo
-        checkpointPath = config.checkpointPath
+        stateStore = stateStore
       )
 
       val results = executor.execute()
@@ -202,7 +215,7 @@ object Pipeline {
       println("╠══════════════════════════════════════════════════════════════╣")
       println(s"║  Modo: $executionMode")
       println(s"║  DAG: ${dagTasks.length} tasks, parallelism=4")
-      println(s"║  Checkpoint: ${if (config.checkpointPath.nonEmpty) config.checkpointPath else "disabled"}")
+      println(s"║  Checkpoint: ${stateStore.getClass.getSimpleName}")
       println(s"║  COS: ${if (config.cosEnabled) "✔ IBM Cloud Object Storage" else "✗"}")
       println(s"║  Db2: ${if (config.db2Enabled) "✔ Gold → Db2 on Cloud" else "✗ no configurado"}")
       println(s"║  Tablas: Bronze=${TableRegistry.bronzeNames.length} Silver=${TableRegistry.silverNames.length} Gold=${TableRegistry.goldNames.length}")
@@ -231,11 +244,9 @@ object Pipeline {
     if (db2.isDefined) println(s">>> Db2 on Cloud — Configurado (${db2.get.hostname})")
     else println(">>> Db2 on Cloud — No configurado (exportación deshabilitada)")
 
-    // En AE Serverless, usar /tmp para escritura local efímera
+    // En AE Serverless, usar /tmp solo para escritura local efímera (charts)
     val chartsDir  = "/tmp/analytics-charts"
-    val checkpointDir = "/tmp/dag-checkpoints"
     new java.io.File(chartsDir).mkdirs()
-    new java.io.File(checkpointDir).mkdirs()
 
     DatalakeConfig(
       rawPath        = cos.rawBase,
@@ -245,7 +256,7 @@ object Pipeline {
       chartsPath     = chartsDir,
       lineagePath    = s"${cos.goldBase}/lineage",
       metricsPath    = s"${cos.goldBase}/metrics",
-      checkpointPath = checkpointDir,
+      checkpointPath = "", // checkpoints via DistributedStateStore en COS
       cosEnabled     = true,
       db2Enabled     = db2.isDefined,
       db2Config      = db2
