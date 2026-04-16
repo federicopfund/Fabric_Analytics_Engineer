@@ -1,5 +1,7 @@
 package medallion.engine
 
+import org.apache.spark.sql.AnalysisException
+
 /**
  * Nodo del DAG de ejecución del pipeline.
  *
@@ -45,7 +47,18 @@ object DagTask {
           body()
           Right(())
         } catch {
-          case e: Exception => Left(TaskError.transient(e.getMessage, e))
+          case e: OutOfMemoryError =>
+            Left(TaskError.fatal(s"JVM error (no retry): ${e.getMessage}", e))
+          case e: StackOverflowError =>
+            Left(TaskError.fatal(s"JVM error (no retry): ${e.getMessage}", e))
+          case e: AnalysisException =>
+            Left(TaskError.fatal(s"Schema/logic error (no retry): ${e.getMessage}", e))
+          case e: IllegalArgumentException =>
+            Left(TaskError.fatal(s"Invalid argument (no retry): ${e.getMessage}", e))
+          case e: java.io.IOException =>
+            Left(TaskError.transient(s"IO error (retryable): ${e.getMessage}", e))
+          case e: Exception =>
+            Left(TaskError.transient(e.getMessage, e))
         }
       },
       retryCount = retryCount,
