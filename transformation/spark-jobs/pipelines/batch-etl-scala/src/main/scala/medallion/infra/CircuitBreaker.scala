@@ -1,7 +1,7 @@
 package medallion.infra
 
 import org.apache.log4j.Logger
-import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong, AtomicReference}
 
 /**
  * Circuit Breaker — Protección contra fallos sistémicos en HDFS/IO.
@@ -35,14 +35,15 @@ class CircuitBreaker(
 
   private val failures = new AtomicInteger(0)
   private val lastFailureMs = new AtomicLong(0L)
-  @volatile private var state: State = Closed
+  private val stateRef = new AtomicReference[State](Closed)
 
   def currentState: State = {
-    state match {
+    stateRef.get() match {
       case Open if System.currentTimeMillis() - lastFailureMs.get() >= resetTimeMs =>
-        state = HalfOpen
-        logger.info(s"⚡ CircuitBreaker[$name]: OPEN → HALF_OPEN (reset timeout elapsed)")
-        HalfOpen
+        if (stateRef.compareAndSet(Open, HalfOpen)) {
+          logger.info(s"⚡ CircuitBreaker[$name]: OPEN → HALF_OPEN (reset timeout elapsed)")
+        }
+        stateRef.get()
       case other => other
     }
   }
@@ -64,8 +65,10 @@ class CircuitBreaker(
         logger.info(s"⚡ CircuitBreaker[$name]: HALF_OPEN — probando operación...")
         try {
           val result = operation
-          reset()
-          logger.info(s"⚡ CircuitBreaker[$name]: HALF_OPEN → CLOSED (operación exitosa)")
+          if (stateRef.compareAndSet(HalfOpen, Closed)) {
+            failures.set(0)
+            logger.info(s"⚡ CircuitBreaker[$name]: HALF_OPEN → CLOSED (operación exitosa)")
+          }
           result
         } catch {
           case e: Exception =>
@@ -101,20 +104,23 @@ class CircuitBreaker(
   }
 
   private def tripOpen(e: Exception): Unit = {
-    state = Open
-    lastFailureMs.set(System.currentTimeMillis())
-    logger.error(s"⚡ CircuitBreaker[$name]: → OPEN — ${failures.get()} fallos consecutivos: ${e.getMessage}")
+    val transitioned = stateRef.compareAndSet(Closed, Open) ||
+                        stateRef.compareAndSet(HalfOpen, Open)
+    if (transitioned) {
+      lastFailureMs.set(System.currentTimeMillis())
+      logger.error(s"⚡ CircuitBreaker[$name]: → OPEN — ${failures.get()} fallos consecutivos: ${e.getMessage}")
+    }
   }
 
   def reset(): Unit = {
     failures.set(0)
-    state = Closed
+    stateRef.set(Closed)
   }
 
   def getFailureCount: Int = failures.get()
 
   override def toString: String =
-    s"CircuitBreaker[$name](state=$currentState, failures=${failures.get()}, threshold=$threshold)"
+    s"CircuitBreaker[$name](state=${stateRef.get()}, failures=${failures.get()}, threshold=$threshold)"
 }
 
 class CircuitBreakerOpenException(message: String) extends RuntimeException(message)
