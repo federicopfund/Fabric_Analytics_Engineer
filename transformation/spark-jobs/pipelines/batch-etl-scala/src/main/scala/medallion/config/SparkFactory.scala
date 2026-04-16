@@ -12,7 +12,7 @@ import medallion.config.IbmCloudConfig.{ExecutionMode, IbmAnalyticsEngine, HdfsC
  */
 object SparkFactory {
 
-  @transient private var instance: SparkSession = _
+  @volatile @transient private var instance: SparkSession = _
 
   /**
    * Crea o retorna SparkSession según el modo detectado.
