@@ -6,51 +6,47 @@
 #   • Cron automático: Diario a las 06:00 UTC
 #   • Manual: workflow_dispatch con parámetros opcionales
 #
-# Secrets requeridos (configurar en Settings → Secrets):
-#   IBMCLOUD_API_KEY, COS_ACCESS_KEY, COS_SECRET_KEY,
-#   DB2_PASSWORD
+# Secrets requeridos:
+#   IBMCLOUD_API_KEY, COS_ACCESS_KEY, COS_SECRET_KEY, DB2_PASSWORD
 # ═══════════════════════════════════════════════════════════════
 name: Spark Pipeline — Medallion v6.0
 
 on:
-  # ── Cron automático (cada hora) ──
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 6 * * *'   # Diario 06:00 UTC
 
-  # ── Trigger manual ──
   workflow_dispatch:
     inputs:
       skip_csv_upload:
         description: 'Saltar upload de CSVs (datos ya en COS)'
         required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
+        default: false
+        type: boolean
       spark_version:
         description: 'Versión de Spark en AE'
         required: false
         default: '3.5'
         type: string
 
+permissions:
+  contents: read
+
+concurrency:
+  group: spark-pipeline-scheduler
+  cancel-in-progress: false
+
 env:
-  # ── IBM Analytics Engine ──
   AE_INSTANCE_ID: a688f3c4-efa9-4f12-842c-6a8d73a7ed2e
   AE_REGION: us-south
-  IAM_TOKEN_URL: https://iam.cloud.ibm.com/identity/token
   AE_API_BASE: https://api.us-south.ae.cloud.ibm.com
 
-  # ── COS ──
   COS_ENDPOINT: s3.us-south.cloud-object-storage.appdomain.cloud
   COS_BUCKET_RAW: datalake-raw-us-south-dev
 
-  # ── Spark App ──
   JAR_COS_KEY: spark-jars/root-assembly-2.0.0.jar
   SPARK_CLASS: medallion.Pipeline
   SPARK_VERSION: '3.5'
 
-  # ── Db2 ──
   DB2_HOSTNAME: 6667d8e9-9d4d-4ccb-ba32-21da3bb5aafc.c1ogj3sd0tgtu0lqde00.databases.appdomain.cloud
   DB2_PORT: '30376'
   DB2_DATABASE: bludb
@@ -59,39 +55,30 @@ env:
 
 jobs:
   # ════════════════════════════════════════════════════════════
-  # Job 1: Upload CSV data to COS (si es necesario)
+  # Job 1: Upload CSV data to COS (idempotente, skip existing)
   # ════════════════════════════════════════════════════════════
   upload-data:
     name: Upload CSV → COS
-    runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.skip_csv_upload != 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: ${{ inputs.skip_csv_upload != true }}
     steps:
-      - name: Checkout repo
-        run: |
-          git clone --depth 1 https://github.com/${{ github.repository }}.git repo
-          cd repo
+      - uses: actions/checkout@v4
 
-      - name: Install IBM Cloud CLI
-        run: |
-          curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
-          ibmcloud plugin install cloud-object-storage -f
-
-      - name: Login to IBM Cloud
-        run: |
-          ibmcloud login --apikey "${{ secrets.IBMCLOUD_API_KEY }}" \
-            -r "${{ env.AE_REGION }}" --quiet
-          ibmcloud cos config crn --force \
-            --crn "$(ibmcloud resource service-instances --service-name cloud-object-storage --output json | python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"])')"
+      - name: IBM Cloud login
+        uses: ./.github/actions/ibmcloud-login
+        with:
+          api-key: ${{ secrets.IBMCLOUD_API_KEY }}
+          region: ${{ env.AE_REGION }}
 
       - name: Upload CSV files to COS raw bucket (skip existing)
         run: |
-          CSV_DIR="repo/transformation/spark-jobs/pipelines/batch-etl-scala/datalake/raw"
+          CSV_DIR="transformation/spark-jobs/pipelines/batch-etl-scala/datalake/raw"
           if [ ! -d "$CSV_DIR" ]; then
             echo "::warning::CSV directory not found: $CSV_DIR"
             exit 0
           fi
 
-          # Listar objetos existentes en el bucket
           EXISTING=$(ibmcloud cos list-objects \
             --bucket "${{ env.COS_BUCKET_RAW }}" \
             --region "${{ env.AE_REGION }}" \
@@ -127,125 +114,128 @@ jobs:
   # ════════════════════════════════════════════════════════════
   submit-spark:
     name: Submit Spark App → AE
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [upload-data]
+    timeout-minutes: 10
     if: ${{ always() && (needs.upload-data.result == 'success' || needs.upload-data.result == 'skipped') }}
     outputs:
       app_id: ${{ steps.submit.outputs.app_id }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+
       - name: Get IAM token
         id: iam
-        run: |
-          TOKEN=$(curl -sX POST "${{ env.IAM_TOKEN_URL }}" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "grant_type=urn:ibm:params:oauth:grant-type:apikey&apikey=${{ secrets.IBMCLOUD_API_KEY }}" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
-
-          if [ -z "$TOKEN" ]; then
-            echo "::error::Failed to obtain IAM token"
-            exit 1
-          fi
-          echo "::add-mask::$TOKEN"
-          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/iam-token
+        with:
+          api-key: ${{ secrets.IBMCLOUD_API_KEY }}
 
       - name: Submit Spark application
         id: submit
+        env:
+          IAM_TOKEN: ${{ steps.iam.outputs.token }}
+          COS_ACCESS_KEY: ${{ secrets.COS_ACCESS_KEY }}
+          COS_SECRET_KEY: ${{ secrets.COS_SECRET_KEY }}
+          DB2_PASSWORD: ${{ secrets.DB2_PASSWORD }}
+          SPARK_VERSION: ${{ inputs.spark_version || env.SPARK_VERSION }}
         run: |
-          APP_NAME="Medallion-v6-$(date +%Y%m%d-%H%M%S)"
-
-          PAYLOAD=$(python3 -c "
-          import json
+          export APP_NAME="Medallion-v6-$(date +%Y%m%d-%H%M%S)"
+          PAYLOAD=$(python3 <<'PYEOF'
+          import json, os
           payload = {
-              'application_details': {
-                  'application': 's3a://${{ env.COS_BUCKET_RAW }}/${{ env.JAR_COS_KEY }}',
-                  'class': '${{ env.SPARK_CLASS }}',
-                  'name': '${APP_NAME}',
-                  'conf': {
-                      'spark.app.name': 'BatchETL-Medallion-v6',
-                      'spark.hadoop.fs.s3a.access.key': '${{ secrets.COS_ACCESS_KEY }}',
-                      'spark.hadoop.fs.s3a.secret.key': '${{ secrets.COS_SECRET_KEY }}',
-                      'spark.hadoop.fs.s3a.endpoint': 'https://${{ env.COS_ENDPOINT }}',
-                      'spark.hadoop.fs.s3a.impl': 'org.apache.hadoop.fs.s3a.S3AFileSystem',
-                      'spark.hadoop.fs.s3a.path.style.access': 'true',
-                      'spark.hadoop.fs.s3a.connection.ssl.enabled': 'true',
-                      'spark.sql.extensions': 'io.delta.sql.DeltaSparkSessionExtension',
-                      'spark.sql.catalog.spark_catalog': 'org.apache.spark.sql.delta.catalog.DeltaCatalog'
+              "application_details": {
+                  "application": f"s3a://{os.environ['COS_BUCKET_RAW']}/{os.environ['JAR_COS_KEY']}",
+                  "class": os.environ["SPARK_CLASS"],
+                  "name": os.environ["APP_NAME"],
+                  "conf": {
+                      "spark.app.name": "BatchETL-Medallion-v6",
+                      "spark.hadoop.fs.s3a.access.key": os.environ["COS_ACCESS_KEY"],
+                      "spark.hadoop.fs.s3a.secret.key": os.environ["COS_SECRET_KEY"],
+                      "spark.hadoop.fs.s3a.endpoint": f"https://{os.environ['COS_ENDPOINT']}",
+                      "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+                      "spark.hadoop.fs.s3a.path.style.access": "true",
+                      "spark.hadoop.fs.s3a.connection.ssl.enabled": "true",
+                      "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
+                      "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
                   },
-                  'env': {
-                      'EXECUTION_MODE': 'IBM_AE',
-                      'AE_INSTANCE_ID': '${{ env.AE_INSTANCE_ID }}',
-                      'COS_ACCESS_KEY': '${{ secrets.COS_ACCESS_KEY }}',
-                      'COS_SECRET_KEY': '${{ secrets.COS_SECRET_KEY }}',
-                      'COS_ENDPOINT': '${{ env.COS_ENDPOINT }}',
-                      'DB2_HOSTNAME': '${{ env.DB2_HOSTNAME }}',
-                      'DB2_PORT': '${{ env.DB2_PORT }}',
-                      'DB2_DATABASE': '${{ env.DB2_DATABASE }}',
-                      'DB2_USERNAME': '${{ env.DB2_USERNAME }}',
-                      'DB2_PASSWORD': '${{ secrets.DB2_PASSWORD }}',
-                      'DB2_SSL': '${{ env.DB2_SSL }}'
+                  "env": {
+                      "EXECUTION_MODE": "IBM_AE",
+                      "AE_INSTANCE_ID": os.environ["AE_INSTANCE_ID"],
+                      "COS_ACCESS_KEY": os.environ["COS_ACCESS_KEY"],
+                      "COS_SECRET_KEY": os.environ["COS_SECRET_KEY"],
+                      "COS_ENDPOINT": os.environ["COS_ENDPOINT"],
+                      "DB2_HOSTNAME": os.environ["DB2_HOSTNAME"],
+                      "DB2_PORT": os.environ["DB2_PORT"],
+                      "DB2_DATABASE": os.environ["DB2_DATABASE"],
+                      "DB2_USERNAME": os.environ["DB2_USERNAME"],
+                      "DB2_PASSWORD": os.environ["DB2_PASSWORD"],
+                      "DB2_SSL": os.environ["DB2_SSL"],
                   },
-                  'runtime': {
-                      'spark_version': '${{ env.SPARK_VERSION }}'
-                  }
+                  "runtime": {"spark_version": os.environ["SPARK_VERSION"]},
               }
           }
           print(json.dumps(payload))
-          ")
+          PYEOF
+          )
 
-          RESPONSE=$(curl -sX POST \
-            "${{ env.AE_API_BASE }}/v3/analytics_engines/${{ env.AE_INSTANCE_ID }}/spark_applications" \
-            -H "Authorization: Bearer ${{ steps.iam.outputs.token }}" \
+          RESPONSE=$(curl -sfS -X POST \
+            "${AE_API_BASE}/v3/analytics_engines/${AE_INSTANCE_ID}/spark_applications" \
+            -H "Authorization: Bearer ${IAM_TOKEN}" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD")
 
           APP_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
-
           if [ -z "$APP_ID" ]; then
             echo "::error::Submit failed. Response: $RESPONSE"
             exit 1
           fi
 
           echo "app_id=$APP_ID" >> "$GITHUB_OUTPUT"
-          echo "### Spark App Submitted ✔" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| App ID | \`$APP_ID\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| App Name | $APP_NAME |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Spark | ${{ env.SPARK_VERSION }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Bucket | ${{ env.COS_BUCKET_RAW }} |" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Spark App Submitted ✔"
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| App ID | \`$APP_ID\` |"
+            echo "| App Name | $APP_NAME |"
+            echo "| Spark | $SPARK_VERSION |"
+            echo "| Bucket | $COS_BUCKET_RAW |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ════════════════════════════════════════════════════════════
   # Job 3: Monitor & Wait for completion
   # ════════════════════════════════════════════════════════════
   monitor:
     name: Monitor Spark App
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [submit-spark]
+    timeout-minutes: 35
     if: ${{ needs.submit-spark.outputs.app_id != '' }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+
       - name: Get IAM token
         id: iam
-        run: |
-          TOKEN=$(curl -sX POST "${{ env.IAM_TOKEN_URL }}" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "grant_type=urn:ibm:params:oauth:grant-type:apikey&apikey=${{ secrets.IBMCLOUD_API_KEY }}" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
-          echo "::add-mask::$TOKEN"
-          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/iam-token
+        with:
+          api-key: ${{ secrets.IBMCLOUD_API_KEY }}
 
       - name: Poll application status
         id: poll
+        env:
+          IAM_TOKEN: ${{ steps.iam.outputs.token }}
+          APP_ID: ${{ needs.submit-spark.outputs.app_id }}
         run: |
-          APP_ID="${{ needs.submit-spark.outputs.app_id }}"
           MAX_POLLS=60        # 60 × 30s = 30 min timeout
           POLL_INTERVAL=30
-
           echo "Monitoring app: $APP_ID"
 
           for i in $(seq 1 $MAX_POLLS); do
-            RESPONSE=$(curl -s \
-              "${{ env.AE_API_BASE }}/v3/analytics_engines/${{ env.AE_INSTANCE_ID }}/spark_applications/$APP_ID" \
-              -H "Authorization: Bearer ${{ steps.iam.outputs.token }}")
+            RESPONSE=$(curl -sfS \
+              "${AE_API_BASE}/v3/analytics_engines/${AE_INSTANCE_ID}/spark_applications/$APP_ID" \
+              -H "Authorization: Bearer ${IAM_TOKEN}")
 
             STATE=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('state','unknown'))" 2>/dev/null)
             echo "[$i/$MAX_POLLS] State: $STATE"
@@ -253,19 +243,24 @@ jobs:
             case "$STATE" in
               finished)
                 echo "state=finished" >> "$GITHUB_OUTPUT"
-                echo "### Pipeline Finished ✔" >> "$GITHUB_STEP_SUMMARY"
-
                 START=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('start_time',''))" 2>/dev/null)
                 END=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('end_time',''))" 2>/dev/null)
-                echo "| Start | $START |" >> "$GITHUB_STEP_SUMMARY"
-                echo "| End | $END |" >> "$GITHUB_STEP_SUMMARY"
+                {
+                  echo "### Pipeline Finished ✔"
+                  echo "| Start | $START |"
+                  echo "| End | $END |"
+                } >> "$GITHUB_STEP_SUMMARY"
                 exit 0
                 ;;
               failed|stopped|error)
                 echo "state=$STATE" >> "$GITHUB_OUTPUT"
                 echo "::error::Application $STATE"
-                echo "### Pipeline $STATE ✗" >> "$GITHUB_STEP_SUMMARY"
-                echo "$RESPONSE" >> "$GITHUB_STEP_SUMMARY"
+                {
+                  echo "### Pipeline $STATE ✗"
+                  echo '```json'
+                  echo "$RESPONSE"
+                  echo '```'
+                } >> "$GITHUB_STEP_SUMMARY"
                 exit 1
                 ;;
               accepted|waiting|running)
@@ -285,6 +280,5 @@ jobs:
         if: always()
         run: |
           echo "Final state: ${{ steps.poll.outputs.state }}"
-          echo ""
           echo "Spark History UI:"
           echo "  https://spark-console.${{ env.AE_REGION }}.ae.cloud.ibm.com/v3/analytics_engines/${{ env.AE_INSTANCE_ID }}/spark_history_ui"
