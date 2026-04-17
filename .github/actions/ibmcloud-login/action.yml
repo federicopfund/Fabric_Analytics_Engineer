@@ -1,0 +1,59 @@
+# ──────────────────────────────────────────────────────────────
+
+## Composite action: IBM Cloud login + COS plugin
+# Caches the IBM Cloud CLI install across runs (~30s saved)
+# ──────────────────────────────────────────────────────────────
+name: IBM Cloud Login
+description: Install IBM Cloud CLI + COS plugin (cached) and login with apikey
+
+inputs:
+  api-key:
+    description: IBM Cloud API key
+    required: true
+  region:
+    description: IBM Cloud region
+    required: false
+    default: us-south
+  configure-cos-crn:
+    description: Whether to set the COS CRN for the ibmcloud cos CLI
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Cache IBM Cloud CLI
+      id: cache-cli
+      uses: actions/cache@v4
+      with:
+        path: |
+          /usr/local/ibmcloud
+          /usr/local/bin/ibmcloud
+          ~/.bluemix/plugins
+        key: ${{ runner.os }}-ibmcloud-cli-v2-cos
+
+    - name: Install IBM Cloud CLI
+      if: steps.cache-cli.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        curl -fsSL https://clis.cloud.ibm.com/install/linux | sh > /dev/null 2>&1
+        ibmcloud plugin install cloud-object-storage -f > /dev/null 2>&1
+
+    - name: Login
+      shell: bash
+      env:
+        IBMCLOUD_API_KEY: ${{ inputs.api-key }}
+      run: |
+        ibmcloud login --apikey "$IBMCLOUD_API_KEY" -r "${{ inputs.region }}" --quiet
+
+    - name: Configure COS CRN
+      if: inputs.configure-cos-crn == 'true'
+      shell: bash
+      run: |
+        CRN=$(ibmcloud resource service-instances --service-name cloud-object-storage --output json \
+          | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['id'] if d else '')")
+        if [ -n "$CRN" ]; then
+          ibmcloud cos config crn --force --crn "$CRN" >/dev/null
+        else
+          echo "::warning::No COS service instance found for apikey"
+        fi
