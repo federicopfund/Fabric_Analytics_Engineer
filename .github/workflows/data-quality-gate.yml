@@ -27,9 +27,15 @@ on:
       fail_on_warning:
         description: 'Fallar en warnings (strict mode)'
         required: false
-        default: 'false'
-        type: choice
-        options: ['false', 'true']
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: data-quality-gate-${{ github.event.workflow_run.id || github.run_id }}
+  cancel-in-progress: false
 
 env:
   AE_REGION: us-south
@@ -46,25 +52,31 @@ env:
 jobs:
   quality-checks:
     name: Data Quality Validation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     # Solo correr si el pipeline fue exitoso (o manual)
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
       - name: Install dependencies
         run: |
           pip install --quiet ibm-cos-sdk pyarrow pandas
           pip install --quiet ibm-db 2>/dev/null || echo "::warning::ibm-db install failed (DB2 checks will be skipped)"
 
-      - name: Get IAM Token
+      - name: Get IAM token
         id: iam
-        run: |
-          TOKEN=$(curl -sX POST "https://iam.cloud.ibm.com/identity/token" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "grant_type=urn:ibm:params:oauth:grant-type:apikey&apikey=${{ secrets.IBMCLOUD_API_KEY }}" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
-          echo "::add-mask::$TOKEN"
-          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/iam-token
+        with:
+          api-key: ${{ secrets.IBMCLOUD_API_KEY }}
 
       - name: Run Quality Checks
         id: quality
@@ -77,7 +89,7 @@ jobs:
           DB2_DATABASE: ${{ env.DB2_DATABASE }}
           DB2_USERNAME: ${{ env.DB2_USERNAME }}
           CHECK_LAYER: ${{ github.event.inputs.layer || 'all' }}
-          STRICT_MODE: ${{ github.event.inputs.fail_on_warning || 'false' }}
+          STRICT_MODE: ${{ github.event.inputs.fail_on_warning == true && 'true' || 'false' }}
         run: |
           python3 << 'PYEOF'
           import os, json, sys
