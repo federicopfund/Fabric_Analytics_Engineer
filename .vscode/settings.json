@@ -1,0 +1,20 @@
+{
+  // Composite actions (action.yml) use a DIFFERENT schema than workflows.
+  // Force them to plain YAML so the github-actions-workflow validator
+  // doesn't flag them as invalid workflows (false positives).
+  "files.associations": {
+    "**/.github/actions/**/action.yml": "yaml",
+    "**/.github/actions/**/action.yaml": "yaml"
+  },
+  // Map schemas so plain YAML validation uses the correct spec.
+  "yaml.schemas": {
+    "https://json.schemastore.org/github-action.json": [
+      ".github/actions/*/action.yml",
+      ".github/actions/*/action.yaml"
+    ],
+    "https://json.schemastore.org/github-workflow.json": [
+      ".github/workflows/*.yml",
+      ".github/workflows/*.yaml"
+    ]
+  }
+}
