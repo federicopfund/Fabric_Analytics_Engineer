@@ -1,0 +1,42 @@
+# ──────────────────────────────────────────────────────────────
+
+## Composite action: Exchange IBM Cloud API key for IAM bearer token
+# Output masked automatically.
+# ──────────────────────────────────────────────────────────────
+name: IBM IAM Token
+description: Obtain and mask an IBM Cloud IAM bearer token from an API key
+
+inputs:
+  api-key:
+    description: IBM Cloud API key
+    required: true
+  token-url:
+    description: IAM token endpoint
+    required: false
+    default: https://iam.cloud.ibm.com/identity/token
+
+outputs:
+  token:
+    description: Bearer token (masked in logs)
+    value: ${{ steps.exchange.outputs.token }}
+
+runs:
+  using: composite
+  steps:
+    - id: exchange
+      shell: bash
+      env:
+        IAM_APIKEY: ${{ inputs.api-key }}
+      run: |
+        TOKEN=$(curl -sfS -X POST "${{ inputs.token-url }}" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          --data-urlencode "grant_type=urn:ibm:params:oauth:grant-type:apikey" \
+          --data-urlencode "apikey=${IAM_APIKEY}" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+        if [ -z "$TOKEN" ]; then
+          echo "::error::Failed to obtain IAM token"
+          exit 1
+        fi
+        echo "::add-mask::$TOKEN"
+        echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
