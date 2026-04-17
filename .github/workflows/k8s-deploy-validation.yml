@@ -16,23 +16,31 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: k8s-deploy-validation-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ════════════════════════════════════════════════════════════
   # Job 1: Static validation (pytest + yaml lint)
   # ════════════════════════════════════════════════════════════
   manifest-tests:
     name: "Manifest Unit Tests"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: infrastructure/spark-k8s
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Python
-        run: |
-          python3 -m pip install --upgrade pip
-          pip install pytest pyyaml
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install deps
+        run: pip install pytest pyyaml
 
       - name: Run manifest unit tests
         run: |
@@ -53,7 +61,8 @@ jobs:
   # ════════════════════════════════════════════════════════════
   static-validation:
     name: "Static Validation"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: infrastructure/spark-k8s
@@ -78,7 +87,8 @@ jobs:
   # ════════════════════════════════════════════════════════════
   integration-test:
     name: "Integration Test (Kind)"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     needs: [manifest-tests, static-validation]
     defaults:
       run:
@@ -141,7 +151,8 @@ jobs:
   # ════════════════════════════════════════════════════════════
   security-audit:
     name: "Security Audit"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: infrastructure/spark-k8s
