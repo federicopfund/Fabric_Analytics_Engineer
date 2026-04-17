@@ -26,11 +26,28 @@ env:
   DB2_DATABASE: bludb
   DB2_USERNAME: qtn87286
 
+permissions:
+  contents: read
+
+concurrency:
+  group: cost-resource-monitor
+  cancel-in-progress: true
+
 jobs:
   monitor:
     name: Resource Report
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
       - name: Install dependencies
         run: pip install --quiet ibm-cos-sdk ibm-db
 
