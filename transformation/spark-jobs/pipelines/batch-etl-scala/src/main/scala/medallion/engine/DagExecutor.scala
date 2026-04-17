@@ -1,10 +1,10 @@
 package medallion.engine
 
 import org.apache.log4j.Logger
-import java.util.concurrent.{ConcurrentHashMap, Executors, CountDownLatch}
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.{ConcurrentHashMap, Executors, CountDownLatch, ThreadFactory}
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 import scala.collection.JavaConverters._
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.{ExecutionContext => SExecutionContext, Future}
 import scala.util.control.NonFatal
 
 /**
@@ -65,8 +65,17 @@ class DagExecutor(
       }
     }
 
-    val pool = Executors.newFixedThreadPool(parallelism)
-    implicit val ec: ExecutionContext = ExecutionContext.fromExecutor(pool)
+    // Pool con threads DAEMON para que el JVM pueda terminar aunque algun thread quede bloqueado
+    val threadCounter = new AtomicLong(0)
+    val daemonFactory = new ThreadFactory {
+      override def newThread(r: Runnable): Thread = {
+        val t = new Thread(r, s"dag-worker-${threadCounter.incrementAndGet()}")
+        t.setDaemon(true)
+        t
+      }
+    }
+    val pool = Executors.newFixedThreadPool(parallelism, daemonFactory)
+    implicit val ec: SExecutionContext = SExecutionContext.fromExecutor(pool)
 
     val completedCount = new AtomicInteger(0)
     val totalTasks = tasks.count(t => statusMap.get(t.id) != Skipped)
@@ -86,6 +95,7 @@ class DagExecutor(
 
       readyTasks.foreach { task =>
         if (statusMap.replace(task.id, Pending, Running)) {
+          println(s">>> [DAG] ▶ STARTING task: ${task.id} (deps=${task.dependencies.mkString(",")})")
           Future {
             // Check if critical dependency failed
             val blockedByFailedDep = task.dependencies.exists { dep =>
@@ -93,11 +103,14 @@ class DagExecutor(
             }
 
             val result = if (blockedByFailedDep) {
+              println(s">>> [DAG] ⏭ SKIPPED task: ${task.id} (critical dep failed)")
               Skipped
             } else {
               val start = System.currentTimeMillis()
               val r = executeWithRetry(task)
-              durations.put(task.id, System.currentTimeMillis() - start)
+              val dur = System.currentTimeMillis() - start
+              durations.put(task.id, dur)
+              println(s">>> [DAG] ■ FINISHED task: ${task.id} in ${dur/1000}s → $r")
               r
             }
 
@@ -108,6 +121,7 @@ class DagExecutor(
             }
             val done = completedCount.incrementAndGet()
             logger.info(s"  DAG progress: $done/$totalTasks — ${task.id}: $result")
+            println(s">>> [DAG] progress: $done/$totalTasks completed")
             latch.countDown()
 
             // Re-schedule: ahora que esta task terminó, otras pueden desbloquearse
@@ -120,9 +134,20 @@ class DagExecutor(
     // Arrancar la primera ronda
     this.synchronized { scheduleReady() }
 
-    // Esperar a que todas las tasks terminen (timeout 30 min)
-    latch.await(30, java.util.concurrent.TimeUnit.MINUTES)
-    pool.shutdown()
+    // Esperar a que todas las tasks terminen (timeout configurable via PIPELINE_DAG_TIMEOUT_MIN, default 15 min)
+    val timeoutMin = sys.env.getOrElse("PIPELINE_DAG_TIMEOUT_MIN", "15").toLong
+    println(s">>> [DAG] Esperando ≤ $timeoutMin min para ${totalTasks} tasks...")
+    val finished = latch.await(timeoutMin, java.util.concurrent.TimeUnit.MINUTES)
+    if (!finished) {
+      println(s">>> [DAG] ⚠ TIMEOUT: $timeoutMin min se agotaron. Tasks pendientes:")
+      statusMap.asScala.filter { case (_, s) => s == Pending || s == Running }.foreach { case (id, s) =>
+        println(s">>> [DAG]   • $id: $s")
+      }
+    }
+    // shutdownNow() interrumpe threads bloqueados (JDBC, S3A, etc)
+    println(">>> [DAG] Cerrando thread pool (shutdownNow)...")
+    val pending = pool.shutdownNow()
+    if (!pending.isEmpty) println(s">>> [DAG] ⚠ ${pending.size} tasks canceladas")
 
     // Reportar resultado
     printDagReport()
