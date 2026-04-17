@@ -29,13 +29,26 @@ env:
   COS_BUCKET_RAW: datalake-raw-us-south-dev
   COS_BUCKET_GOLD: datalake-gold-us-south-dev
 
+permissions:
+  contents: read
+  issues: write    # opens drift issues
+
+concurrency:
+  group: drift-detection
+  cancel-in-progress: false
+
 jobs:
   drift-detection:
     name: Detect Schema & Data Drift
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - name: Checkout
-        run: git clone --depth 1 https://github.com/${{ github.repository }}.git repo
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
 
       - name: Install dependencies
         run: pip install --quiet ibm-cos-sdk pyarrow pandas
