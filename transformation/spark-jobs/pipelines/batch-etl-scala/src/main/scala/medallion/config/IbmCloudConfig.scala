@@ -64,10 +64,10 @@ object IbmCloudConfig {
   // ═══════════════════════════════════════════════════
 
   def loadCosConfig(): CosConfig = CosConfig(
-    accessKey  = env("COS_ACCESS_KEY",  "786065478ff34d3b84016125490a4d12"),
-    secretKey  = env("COS_SECRET_KEY",  "838da9c9a9cd2521d51e856da0dd876884f8108226f5bd7c"),
-    endpoint   = env("COS_ENDPOINT",    "s3.us-south.cloud-object-storage.appdomain.cloud"),
-    region     = env("COS_REGION",      "us-south"),
+    accessKey  = envRequired("COS_ACCESS_KEY"),
+    secretKey  = envRequired("COS_SECRET_KEY"),
+    endpoint   = env("COS_ENDPOINT",      "s3.us-south.cloud-object-storage.appdomain.cloud"),
+    region     = env("COS_REGION",        "us-south"),
     bucketRaw    = env("COS_BUCKET_RAW",    "datalake-raw-us-south-dev"),
     bucketBronze = env("COS_BUCKET_BRONZE", "datalake-bronze-us-south-dev"),
     bucketSilver = env("COS_BUCKET_SILVER", "datalake-silver-us-south-dev"),
@@ -235,6 +235,14 @@ object IbmCloudConfig {
       LocalMode
     }
   }
+
+  private def envRequired(key: String): String =
+    sys.env.getOrElse(key,
+      throw new IllegalStateException(
+        s"Variable de entorno requerida no configurada: $key. " +
+        s"Configurar en .env o como secret de Kubernetes/AE."
+      )
+    )
 
   private def env(key: String, default: String): String =
     sys.env.getOrElse(key, default)
