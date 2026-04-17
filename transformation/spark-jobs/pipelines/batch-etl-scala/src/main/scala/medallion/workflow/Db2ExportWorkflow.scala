@@ -59,40 +59,60 @@ object Db2ExportWorkflow {
     println(s"  📊 Tablas Gold a exportar: ${TableRegistry.goldNames.length}")
     println()
 
-    // Verificar conectividad
-    if (!testConnection(db2)) {
-      logger.error("✗ No se pudo conectar a Db2 — abortando exportación")
-      return 0
-    }
+    // Skip testConnection() — ahorra 10-30s. JDBC write fallará rápido si no hay conexión.
 
     var exported = 0
 
+    // Exportación en paralelo: cada tabla en su propio thread para solapar I/O Delta read + JDBC write
+    val exportParallelism = sys.env.getOrElse("DB2_EXPORT_PARALLELISM", "4").toInt
+    val pool = java.util.concurrent.Executors.newFixedThreadPool(exportParallelism, new java.util.concurrent.ThreadFactory {
+      private val counter = new java.util.concurrent.atomic.AtomicInteger(0)
+      override def newThread(r: Runnable): Thread = {
+        val t = new Thread(r, s"db2-export-${counter.incrementAndGet()}")
+        t.setDaemon(true)
+        t
+      }
+    })
+    val exportedCounter = new java.util.concurrent.atomic.AtomicInteger(0)
+    val latch = new java.util.concurrent.CountDownLatch(TableRegistry.goldNames.length)
+
     TableRegistry.goldNames.foreach { tableName =>
-      try {
-        val tablePath = s"${config.goldPath}/$tableName"
+      pool.submit(new Runnable {
+        override def run(): Unit = try {
+          val tablePath = s"${config.goldPath}/$tableName"
 
-        if (!DataLakeIO.pathExists(tablePath)) {
-          logger.warn(s"  ⏭ gold/$tableName no existe — skip")
-        } else {
-          val startTime = System.currentTimeMillis()
+          if (!DataLakeIO.pathExists(tablePath)) {
+            logger.warn(s"  ⏭ gold/$tableName no existe — skip")
+          } else {
+            val startTime = System.currentTimeMillis()
 
-          // Leer tabla Gold
-          val df = readGoldTable(spark, tablePath, tableName)
-          val rowCount = df.count()
+            // Leer tabla Gold y exportar a Db2 (sin count() que hace full-scan extra)
+            val df = readGoldTable(spark, tablePath, tableName)
 
           // Escribir a Db2 via JDBC
           writeToDb2(df, db2, tableName)
 
           val elapsed = (System.currentTimeMillis() - startTime) / 1000.0
-          println(f"  ✔ $tableName — $rowCount%,d registros en ${elapsed}%.1fs")
-          exported += 1
+          println(f"  ✔ $tableName — exportado en ${elapsed}%.1fs")
+          exportedCounter.incrementAndGet()
+          }
+        } catch {
+          case NonFatal(e) =>
+            logger.error(s"  ✗ $tableName — ${e.getMessage}", e)
+            println(s"  ✗ $tableName — ERROR: ${e.getMessage}")
+        } finally {
+          latch.countDown()
         }
-      } catch {
-        case NonFatal(e) =>
-          logger.error(s"  ✗ $tableName — ${e.getMessage}", e)
-          println(s"  ✗ $tableName — ERROR: ${e.getMessage}")
-      }
+      })
     }
+
+    // Esperar a que terminen (timeout 8 min total)
+    val finished = latch.await(8, java.util.concurrent.TimeUnit.MINUTES)
+    pool.shutdownNow()
+    if (!finished) {
+      logger.warn("  ⚠ Db2 export timeout — algunas tablas no se exportaron")
+    }
+    exported = exportedCounter.get()
 
     println()
     println(s"  ═══ RESULTADO: $exported/${TableRegistry.goldNames.length} tablas exportadas a Db2 ═══")
@@ -156,11 +176,18 @@ object Db2ExportWorkflow {
     connProperties.put("batchsize", BATCH_SIZE.toString)
     connProperties.put("fetchsize", FETCH_SIZE.toString)
     connProperties.put("sslConnection", db2.sslConnection.toString)
+    // Timeouts para evitar cuelgues
+    connProperties.put("loginTimeout", "30")         // segundos
+    connProperties.put("queryTimeout", "300")        // segundos (5 min por query)
+    connProperties.put("socketTimeout", "300000")    // ms (5 min)
+    connProperties.put("connectTimeout", "30000")    // ms
 
     cleanDf.write
       .mode("overwrite")
-      .option("truncate", "true")  // TRUNCATE en vez de DROP+CREATE para preservar permisos
+      .option("truncate", "true")           // TRUNCATE en vez de DROP+CREATE para preservar permisos
       .option("batchsize", BATCH_SIZE)
+      .option("isolationLevel", "NONE")     // Sin bloqueo de transacción — mucho más rápido
+      .option("rewriteBatchedStatements", "true")
       .jdbc(db2.jdbcUrl, tableName.toUpperCase, connProperties)
   }
 
@@ -170,10 +197,15 @@ object Db2ExportWorkflow {
   private def testConnection(db2: Db2Config): Boolean = {
     try {
       Class.forName(JDBC_DRIVER)
+      // Timeout global para DriverManager (evita cuelgues indefinidos)
+      java.sql.DriverManager.setLoginTimeout(30)
       val props = new java.util.Properties()
       props.put("user", db2.username)
       props.put("password", db2.password)
       props.put("sslConnection", db2.sslConnection.toString)
+      props.put("loginTimeout", "30")
+      props.put("connectTimeout", "30000")
+      props.put("socketTimeout", "60000")
 
       val conn = java.sql.DriverManager.getConnection(db2.jdbcUrl, props)
       val valid = conn.isValid(10)
