@@ -14,6 +14,7 @@ import org.apache.hadoop.fs.{FileSystem, Path}
 trait PipelineStateStore {
   def isCompleted(taskId: String): Boolean
   def markCompleted(taskId: String, durationMs: Long, description: String = ""): Unit
+  def clearAll(): Unit = ()
 }
 
 /** Checkpointing deshabilitado — operación nula */
@@ -55,6 +56,16 @@ class LocalStateStore(basePath: String) extends PipelineStateStore {
     val writer = new java.io.PrintWriter(s"$basePath/.dag_$taskId.json")
     try { writer.write(json) } finally { writer.close() }
     logger.info(s"  ✔ Checkpoint (local): $taskId → $basePath/.dag_$taskId.json")
+  }
+
+  override def clearAll(): Unit = {
+    val d = new java.io.File(basePath)
+    if (d.exists()) {
+      d.listFiles().filter(_.getName.startsWith(".dag_")).foreach { f =>
+        f.delete()
+        logger.info(s"  🗑 Checkpoint eliminado: ${f.getName}")
+      }
+    }
   }
 }
 
@@ -104,5 +115,17 @@ class DistributedStateStore(spark: SparkSession, basePath: String) extends Pipel
     val out = filesystem.create(outPath, true)
     try { out.writeBytes(json) } finally { out.close() }
     logger.info(s"  ✔ Checkpoint (distributed): $taskId → $outPath")
+  }
+
+  override def clearAll(): Unit = {
+    val filesystem = fs
+    val dirPath = new Path(basePath)
+    if (filesystem.exists(dirPath)) {
+      val files = filesystem.listStatus(dirPath)
+      files.filter(_.getPath.getName.startsWith(".dag_")).foreach { f =>
+        filesystem.delete(f.getPath, false)
+        logger.info(s"  🗑 Checkpoint eliminado: ${f.getPath.getName}")
+      }
+    }
   }
 }
