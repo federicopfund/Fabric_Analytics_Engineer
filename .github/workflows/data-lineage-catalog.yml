@@ -24,13 +24,25 @@ env:
   DB2_DATABASE: bludb
   DB2_USERNAME: qtn87286
 
+permissions:
+  contents: read
+
+concurrency:
+  group: data-lineage-catalog
+  cancel-in-progress: true
+
 jobs:
   catalog:
     name: Generate Data Catalog
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - name: Checkout
-        run: git clone --depth 1 https://github.com/${{ github.repository }}.git repo
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
 
       - name: Install dependencies
         run: pip install --quiet ibm-cos-sdk ibm-db pyarrow pandas
