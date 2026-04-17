@@ -91,8 +91,10 @@ object WorkflowRegistry {
   def buildDag(ctx: ExecutionContext): Seq[DagTask] = {
     validateRegistry()
 
-    val enabled = all.filter(_.isEnabledFor(ctx.features))
-    val skipped = all.filterNot(_.isEnabledFor(ctx.features))
+    val enabled    = all.filter(_.isEnabledFor(ctx.features))
+    val skipped    = all.filterNot(_.isEnabledFor(ctx.features))
+    val enabledIds = enabled.map(_.id).toSet
+    val skippedIds = skipped.map(_.id).toSet
 
     if (skipped.nonEmpty)
       logger.info(s"  WorkflowRegistry: skipped by feature flags: ${skipped.map(_.id).mkString(", ")}")
@@ -100,7 +102,25 @@ object WorkflowRegistry {
     logger.info(s"  WorkflowRegistry: building DAG with ${enabled.length} workflows: " +
       enabled.map(_.id).mkString(", "))
 
-    enabled.map(_.asDagTask(ctx))
+    // Sanear dependencias: si un workflow dependía de otro que quedó deshabilitado
+    // por feature flag, esa dep no existirá en taskMap del DagExecutor y causaría
+    // un deadlock (ejemplo: METRICS dep=HIVE_AUDIT cuando hive=false).
+    // Eliminar esas deps — equivale a tratarlas como satisfechas.
+    enabled.map { w =>
+      val task        = w.asDagTask(ctx)
+      val missingDeps = task.dependencies -- enabledIds
+      if (missingDeps.nonEmpty) {
+        val (filteredOut, orphan) = missingDeps.partition(skippedIds.contains)
+        if (orphan.nonEmpty) {
+          // Estas son realmente rotas (no son por feature flag) — validateRegistry
+          // ya debería haberlas atrapado, pero fallar explícito es más seguro
+          throw new IllegalStateException(
+            s"WorkflowRegistry: ${w.id} tiene dependencias huérfanas: ${orphan.mkString(",")}")
+        }
+        logger.warn(s"  WorkflowRegistry: ${w.id} deps saneadas — removidas por feature flag: ${filteredOut.mkString(",")}")
+        task.copy(dependencies = task.dependencies -- missingDeps)
+      } else task
+    }
   }
 
   /** Valida que el registry no tenga ids duplicados ni dependencias rotas */

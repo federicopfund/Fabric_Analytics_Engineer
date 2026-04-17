@@ -85,11 +85,19 @@ class DagExecutor(
     def scheduleReady(): Unit = {
       val readyTasks = tasks.filter { t =>
         statusMap.get(t.id) == Pending && t.dependencies.forall { dep =>
-          val depStatus = statusMap.get(dep)
-          depStatus == Completed || depStatus == Skipped ||
-            depStatus.isInstanceOf[CompletedWithWarning] ||
-            // Tasks no-críticas fallidas no bloquean dependientes
-            (depStatus.isInstanceOf[Failed] && taskMap.get(dep).exists(!_.critical))
+          if (!taskMap.contains(dep)) {
+            // Dep no está registrada en el DAG (probablemente filtrada por feature flag
+            // en una versión previa del código). Tratar como satisfecha en vez de
+            // colgar indefinidamente. Log una vez para visibilidad.
+            logger.warn(s"  ⚠ DAG: ${t.id} declara dep '$dep' inexistente — tratada como satisfecha")
+            true
+          } else {
+            val depStatus = statusMap.get(dep)
+            depStatus == Completed || depStatus == Skipped ||
+              depStatus.isInstanceOf[CompletedWithWarning] ||
+              // Tasks no-críticas fallidas no bloquean dependientes
+              (depStatus.isInstanceOf[Failed] && taskMap.get(dep).exists(!_.critical))
+          }
         }
       }
 
@@ -127,6 +135,27 @@ class DagExecutor(
             // Re-schedule: ahora que esta task terminó, otras pueden desbloquearse
             this.synchronized { scheduleReady() }
           }
+        }
+      }
+
+      // ── Deadlock detection ────────────────────────────────────────────
+      // Si no hay tasks Running ni readyTasks pero sí hay Pending, ninguna task
+      // podrá progresar jamás. En vez de esperar el timeout completo (PIPELINE_DAG_TIMEOUT_MIN
+      // ~15 min de gap facturado), marcamos las Pending como Failed(Unreachable) y
+      // liberamos el latch para que la sesión cierre de inmediato.
+      val stillRunning = statusMap.asScala.values.exists(_ == Running)
+      val stillPending = statusMap.asScala.values.count(_ == Pending)
+      if (!stillRunning && readyTasks.isEmpty && stillPending > 0) {
+        println(s">>> [DAG] ⚠ DEADLOCK detectado: $stillPending task(s) Pending sin deps satisfacibles — cerrando temprano")
+        statusMap.asScala.filter { case (_, s) => s == Pending }.foreach { case (id, _) =>
+          val unreachableDeps = taskMap.get(id).map(_.dependencies).getOrElse(Set.empty).filter { d =>
+            val ds = statusMap.get(d)
+            ds == null || ds.isInstanceOf[Failed] || ds == Pending
+          }
+          val err = new RuntimeException(s"Unreachable: deps sin satisfacer = ${unreachableDeps.mkString(",")}")
+          statusMap.put(id, Failed(err))
+          println(s">>> [DAG]   ✗ $id marcada Failed(Unreachable) — deps: ${unreachableDeps.mkString(",")}")
+          latch.countDown()
         }
       }
     }
