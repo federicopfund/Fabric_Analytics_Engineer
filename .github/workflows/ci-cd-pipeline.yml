@@ -135,15 +135,15 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+
       - name: Download JAR artifact
         uses: actions/download-artifact@v4
         with:
           name: spark-jar
           path: ./jar
-
-      - uses: actions/checkout@v4
-        with:
-          sparse-checkout: .github/actions
 
       - name: IBM Cloud login
         uses: ./.github/actions/ibmcloud-login
@@ -154,10 +154,16 @@ jobs:
 
       - name: Upload JAR
         run: |
+          JAR_FILE="./jar/${{ env.JAR_NAME }}"
+          if [ ! -f "$JAR_FILE" ]; then
+            echo "::error::JAR not found after download: $JAR_FILE"
+            ls -laR ./jar || true
+            exit 1
+          fi
           ibmcloud cos put-object \
             --bucket "${{ env.COS_BUCKET_RAW }}" \
             --key "${{ env.JAR_COS_KEY }}" \
-            --body "./jar/${{ env.JAR_NAME }}" \
+            --body "$JAR_FILE" \
             --region "${{ env.AE_REGION }}"
           echo "✔ JAR uploaded to COS"
 
