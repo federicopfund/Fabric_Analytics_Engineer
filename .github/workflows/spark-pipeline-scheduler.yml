@@ -83,23 +83,44 @@ jobs:
           ibmcloud cos config crn --force \
             --crn "$(ibmcloud resource service-instances --service-name cloud-object-storage --output json | python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["id"])')"
 
-      - name: Upload CSV files to COS raw bucket
+      - name: Upload CSV files to COS raw bucket (skip existing)
         run: |
           CSV_DIR="repo/transformation/spark-jobs/pipelines/batch-etl-scala/datalake/raw"
           if [ ! -d "$CSV_DIR" ]; then
             echo "::warning::CSV directory not found: $CSV_DIR"
             exit 0
           fi
+
+          # Listar objetos existentes en el bucket
+          EXISTING=$(ibmcloud cos list-objects \
+            --bucket "${{ env.COS_BUCKET_RAW }}" \
+            --region "${{ env.AE_REGION }}" \
+            --output json 2>/dev/null \
+            | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for obj in data.get('Contents', []):
+              print(obj['Key'])
+          " 2>/dev/null || echo "")
+
+          UPLOADED=0
+          SKIPPED=0
           for csv in "$CSV_DIR"/*.csv; do
             filename=$(basename "$csv")
-            echo "Uploading: $filename"
-            ibmcloud cos put-object \
-              --bucket "${{ env.COS_BUCKET_RAW }}" \
-              --key "$filename" \
-              --body "$csv" \
-              --region "${{ env.AE_REGION }}"
+            if echo "$EXISTING" | grep -qx "$filename"; then
+              echo "⏭ Already in bucket: $filename"
+              SKIPPED=$((SKIPPED + 1))
+            else
+              echo "Uploading: $filename"
+              ibmcloud cos put-object \
+                --bucket "${{ env.COS_BUCKET_RAW }}" \
+                --key "$filename" \
+                --body "$csv" \
+                --region "${{ env.AE_REGION }}"
+              UPLOADED=$((UPLOADED + 1))
+            fi
           done
-          echo "✔ All CSV files uploaded"
+          echo "✔ Done — uploaded: $UPLOADED, skipped (already exist): $SKIPPED"
 
   # ════════════════════════════════════════════════════════════
   # Job 2: Submit Spark Application to AE
