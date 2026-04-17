@@ -1,0 +1,54 @@
+# ──────────────────────────────────────────────────────────────
+
+## Composite action: Setup Scala + sbt build environment
+# Replaces manual apt installs of JDK/sbt (~60s) + enables cache
+# for ~/.sbt, ~/.ivy2, ~/.cache/coursier, project/target, target
+# ──────────────────────────────────────────────────────────────
+name: Setup Scala Build
+description: Checkout, install JDK 11 + sbt, enable sbt/coursier cache
+
+inputs:
+  java-version:
+    description: Java version
+    required: false
+    default: '11'
+  java-distribution:
+    description: Java distribution (temurin, zulu, corretto, ...)
+    required: false
+    default: temurin
+  working-directory:
+    description: Path to sbt project (for cache key)
+    required: false
+    default: 'transformation/spark-jobs/pipelines/batch-etl-scala'
+  fetch-depth:
+    description: git fetch depth
+    required: false
+    default: '1'
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: ${{ inputs.fetch-depth }}
+
+    - uses: actions/setup-java@v4
+      with:
+        distribution: ${{ inputs.java-distribution }}
+        java-version: ${{ inputs.java-version }}
+        cache: sbt
+
+    - uses: sbt/setup-sbt@v1
+
+    - name: Cache Coursier / Ivy
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/coursier
+          ~/.ivy2/cache
+          ~/.sbt/boot
+          ${{ inputs.working-directory }}/project/target
+          ${{ inputs.working-directory }}/target/scala-2.12/resolution-cache
+        key: ${{ runner.os }}-sbt-${{ hashFiles(format('{0}/build.sbt', inputs.working-directory), format('{0}/project/**/*.sbt', inputs.working-directory), format('{0}/project/build.properties', inputs.working-directory)) }}
+        restore-keys: |
+          ${{ runner.os }}-sbt-
