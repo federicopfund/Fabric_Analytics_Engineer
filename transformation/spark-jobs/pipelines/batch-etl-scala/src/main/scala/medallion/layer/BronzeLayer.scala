@@ -51,7 +51,7 @@ object BronzeLayer {
     val tableName = fileName.stripSuffix(".csv").toLowerCase
     val outputPath = s"$bronzePath/$tableName"
 
-    if (DataLakeIO.pathExists(outputPath)) {
+    if (DataLakeIO.shouldSkip(outputPath)) {
       logger.info(s"⏭ Bronze/$tableName ya existe — skip")
       return
     }

@@ -45,7 +45,7 @@ object SilverLayer {
 
   private def buildCatalogoProductos(spark: SparkSession, silverPath: String): Unit = {
     val tableName = "catalogo_productos"
-    if (DataLakeIO.pathExists(s"$silverPath/$tableName")) {
+    if (DataLakeIO.shouldSkip(s"$silverPath/$tableName")) {
       logger.info(s"⏭ Silver/$tableName ya existe — skip"); return
     }
     logger.info(s"▶ Construyendo: $tableName")
@@ -65,7 +65,7 @@ object SilverLayer {
 
   private def buildVentasEnriquecidas(spark: SparkSession, silverPath: String): Unit = {
     val tableName = "ventas_enriquecidas"
-    if (DataLakeIO.pathExists(s"$silverPath/$tableName")) {
+    if (DataLakeIO.shouldSkip(s"$silverPath/$tableName")) {
       logger.info(s"⏭ Silver/$tableName ya existe — skip"); return
     }
     logger.info(s"▶ Construyendo: $tableName")
@@ -104,7 +104,7 @@ object SilverLayer {
 
   private def buildResumenVentasMensuales(spark: SparkSession, silverPath: String): Unit = {
     val tableName = "resumen_ventas_mensuales"
-    if (DataLakeIO.pathExists(s"$silverPath/$tableName")) {
+    if (DataLakeIO.shouldSkip(s"$silverPath/$tableName")) {
       logger.info(s"⏭ Silver/$tableName ya existe — skip"); return
     }
     logger.info(s"▶ Construyendo: $tableName")
@@ -132,7 +132,7 @@ object SilverLayer {
 
   private def buildRentabilidadProducto(spark: SparkSession, silverPath: String): Unit = {
     val tableName = "rentabilidad_producto"
-    if (DataLakeIO.pathExists(s"$silverPath/$tableName")) {
+    if (DataLakeIO.shouldSkip(s"$silverPath/$tableName")) {
       logger.info(s"⏭ Silver/$tableName ya existe — skip"); return
     }
     logger.info(s"▶ Construyendo: $tableName")
@@ -160,7 +160,7 @@ object SilverLayer {
 
   private def buildSegmentacionClientes(spark: SparkSession, silverPath: String): Unit = {
     val tableName = "segmentacion_clientes"
-    if (DataLakeIO.pathExists(s"$silverPath/$tableName")) {
+    if (DataLakeIO.shouldSkip(s"$silverPath/$tableName")) {
       logger.info(s"⏭ Silver/$tableName ya existe — skip"); return
     }
     logger.info(s"▶ Construyendo: $tableName")
@@ -193,7 +193,7 @@ object SilverLayer {
 
   private def buildProduccionOperador(spark: SparkSession, silverPath: String): Unit = {
     val tableName = "produccion_operador"
-    if (DataLakeIO.pathExists(s"$silverPath/$tableName")) {
+    if (DataLakeIO.shouldSkip(s"$silverPath/$tableName")) {
       logger.info(s"⏭ Silver/$tableName ya existe — skip"); return
     }
     logger.info(s"▶ Construyendo: $tableName")
@@ -216,7 +216,7 @@ object SilverLayer {
 
   private def buildEficienciaMinera(spark: SparkSession, silverPath: String): Unit = {
     val tableName = "eficiencia_minera"
-    if (DataLakeIO.pathExists(s"$silverPath/$tableName")) {
+    if (DataLakeIO.shouldSkip(s"$silverPath/$tableName")) {
       logger.info(s"⏭ Silver/$tableName ya existe — skip"); return
     }
     logger.info(s"▶ Construyendo: $tableName")
@@ -244,7 +244,7 @@ object SilverLayer {
 
   private def buildProduccionPorPais(spark: SparkSession, silverPath: String): Unit = {
     val tableName = "produccion_por_pais"
-    if (DataLakeIO.pathExists(s"$silverPath/$tableName")) {
+    if (DataLakeIO.shouldSkip(s"$silverPath/$tableName")) {
       logger.info(s"⏭ Silver/$tableName ya existe — skip"); return
     }
     logger.info(s"▶ Construyendo: $tableName")

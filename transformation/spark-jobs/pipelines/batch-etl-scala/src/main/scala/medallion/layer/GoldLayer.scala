@@ -38,12 +38,23 @@ object GoldLayer {
       buildKpiMineria(spark, goldPath)
     }
 
+    // Mantenimiento opcional (PIPELINE_VACUUM=true). Se recomienda correrlo
+    // semanalmente; mantiene el bucket limpio y evita que lectores no-Delta
+    // (ej. pyarrow) vean parquets de versiones viejas.
+    DataLakeIO.vacuumDeltaTables(
+      goldPath,
+      Seq(
+        "dim_producto", "dim_cliente", "fact_ventas", "kpi_ventas_mensuales",
+        "dim_operador", "fact_produccion_minera", "kpi_mineria"
+      )
+    )
+
     logger.info("✔ GOLD LAYER completada")
   }
 
   private def buildDimProducto(spark: SparkSession, goldPath: String): Unit = {
     val tableName = "dim_producto"
-    if (DataLakeIO.pathExists(s"$goldPath/$tableName")) {
+    if (DataLakeIO.shouldSkip(s"$goldPath/$tableName")) {
       logger.info(s"⏭ Gold/$tableName ya existe — skip"); return
     }
     logger.info(s"▶ Construyendo: $tableName")
@@ -81,7 +92,7 @@ object GoldLayer {
 
   private def buildDimCliente(spark: SparkSession, goldPath: String): Unit = {
     val tableName = "dim_cliente"
-    if (DataLakeIO.pathExists(s"$goldPath/$tableName")) {
+    if (DataLakeIO.shouldSkip(s"$goldPath/$tableName")) {
       logger.info(s"⏭ Gold/$tableName ya existe — skip"); return
     }
     logger.info(s"▶ Construyendo: $tableName")
@@ -105,13 +116,24 @@ object GoldLayer {
         current_timestamp() AS _gold_updated_at
       FROM silver_segmentacion_clientes
     """)
-    DataLakeIO.writeDelta(df.coalesce(1), goldPath, tableName)
+    // Adaptativo: overwrite hasta 1M filas, MERGE (SCD-1 por cliente_key) por encima.
+    DataLakeIO.writeOrMergeDelta(
+      df.coalesce(1),
+      goldPath,
+      tableName,
+      mergeKeys = Seq("cliente_key"),
+      thresholdRows = 1000000L
+    )
     println(s"  ✔ gold/$tableName")
   }
 
   private def buildFactVentas(spark: SparkSession, goldPath: String): Unit = {
     val tableName = "fact_ventas"
-    if (DataLakeIO.pathExists(s"$goldPath/$tableName")) {
+    // Para fact: si la tabla ya alcanzó el umbral de MERGE, NO saltamos por shouldSkip
+    // porque el MERGE necesita correr para upsertear el delta. Solo saltamos si
+    // la estrategia es overwrite y shouldSkip lo indica.
+    if (DataLakeIO.shouldSkip(s"$goldPath/$tableName") &&
+        DataLakeIO.chooseWriteStrategy(goldPath, tableName, 5000000L) == DataLakeIO.FullOverwrite) {
       logger.info(s"⏭ Gold/$tableName ya existe — skip"); return
     }
     logger.info(s"▶ Construyendo: $tableName")
@@ -136,13 +158,23 @@ object GoldLayer {
       FROM silver_ventas_enriquecidas ve
       LEFT JOIN silver_segmentacion_clientes sc ON ve.Cod_Cliente = sc.Cod_Cliente
     """)
-    DataLakeIO.writeDelta(df.coalesce(1), goldPath, tableName)
-    println(s"  ✔ gold/$tableName")
+    // Adaptativo: overwrite hasta 5M filas, MERGE (upsert por orden_id) por encima.
+    // En MERGE, `df` debe contener SOLO las \u00f3rdenes nuevas/modificadas. Si Silver siempre
+    // emite full-refresh, el MERGE igual funciona pero pierde la ganancia incremental;
+    // para activar el flujo incremental real, filtrar `df` por watermark antes de llamar.
+    DataLakeIO.writeOrMergeDelta(
+      df.coalesce(1),
+      goldPath,
+      tableName,
+      mergeKeys = Seq("orden_id"),
+      thresholdRows = 5000000L
+    )
+    println(s"  \u2714 gold/$tableName")
   }
 
   private def buildKpiVentasMensuales(spark: SparkSession, goldPath: String): Unit = {
     val tableName = "kpi_ventas_mensuales"
-    if (DataLakeIO.pathExists(s"$goldPath/$tableName")) {
+    if (DataLakeIO.shouldSkip(s"$goldPath/$tableName")) {
       logger.info(s"⏭ Gold/$tableName ya existe — skip"); return
     }
     logger.info(s"▶ Construyendo: $tableName")
@@ -174,14 +206,23 @@ object GoldLayer {
         ROUND(ingreso_ytd, 2) AS ingreso_ytd, ROUND(margen_ytd, 2) AS margen_ytd,
         current_timestamp() AS _gold_updated_at
       FROM con_lag ORDER BY Anio, Mes, Categoria
-    """)
-    DataLakeIO.writeDelta(df.coalesce(1), goldPath, tableName)
-    println(s"  ✔ gold/$tableName")
+    """).cache()
+
+    // Solo reescribimos los años efectivamente tocados por este run (replaceWhere).
+    // Esto preserva agregados históricos cuando la simulación llena solo un rango.
+    val aniosTocados = df.select("anio").distinct().collect().map(_.getInt(0))
+    if (aniosTocados.isEmpty) {
+      logger.warn(s"$tableName: no hay filas a escribir, skip"); df.unpersist(); return
+    }
+    val predicate = s"anio IN (${aniosTocados.mkString(", ")})"
+    DataLakeIO.writeDeltaReplaceWhere(df.coalesce(1), goldPath, tableName, predicate)
+    df.unpersist()
+    println(s"  ✔ gold/$tableName  [replaceWhere $predicate]")
   }
 
   private def buildDimOperador(spark: SparkSession, goldPath: String): Unit = {
     val tableName = "dim_operador"
-    if (DataLakeIO.pathExists(s"$goldPath/$tableName")) {
+    if (DataLakeIO.shouldSkip(s"$goldPath/$tableName")) {
       logger.info(s"⏭ Gold/$tableName ya existe — skip"); return
     }
     logger.info(s"▶ Construyendo: $tableName")
@@ -212,7 +253,7 @@ object GoldLayer {
 
   private def buildFactProduccionMinera(spark: SparkSession, goldPath: String): Unit = {
     val tableName = "fact_produccion_minera"
-    if (DataLakeIO.pathExists(s"$goldPath/$tableName")) {
+    if (DataLakeIO.shouldSkip(s"$goldPath/$tableName")) {
       logger.info(s"⏭ Gold/$tableName ya existe — skip"); return
     }
     logger.info(s"▶ Construyendo: $tableName")
@@ -242,7 +283,7 @@ object GoldLayer {
 
   private def buildKpiMineria(spark: SparkSession, goldPath: String): Unit = {
     val tableName = "kpi_mineria"
-    if (DataLakeIO.pathExists(s"$goldPath/$tableName")) {
+    if (DataLakeIO.shouldSkip(s"$goldPath/$tableName")) {
       logger.info(s"⏭ Gold/$tableName ya existe — skip"); return
     }
     logger.info(s"▶ Construyendo: $tableName")

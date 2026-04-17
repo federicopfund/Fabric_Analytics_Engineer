@@ -314,7 +314,16 @@ main() {
                 fi
             fi
 
-            upload_csv_data
+            # --skip-csv-upload conserva los CSVs ya en COS (útil después del simulator)
+            local skip_csv=false
+            for arg in "$@"; do
+                [[ "$arg" == "--skip-csv-upload" ]] && skip_csv=true
+            done
+            if [[ "$skip_csv" == "true" ]]; then
+                log_info "Saltando upload de CSVs (--skip-csv-upload)"
+            else
+                upload_csv_data
+            fi
             upload_jar_to_cos
             submit_application
             ;;

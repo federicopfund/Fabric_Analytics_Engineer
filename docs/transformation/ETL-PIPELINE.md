@@ -2,7 +2,9 @@
 
 ## Resumen
 
-Pipeline ETL batch implementado en Scala sobre Apache Spark 3.3.1 que sigue el patrón Medallion (RAW → BRONZE → SILVER → GOLD). Incluye un motor de ejecución DAG con typed errors, circuit breaker, checkpoints JSON, y 6 workflows especializados.
+Pipeline ETL batch implementado en Scala sobre Apache Spark 3.5 que sigue el patrón Medallion (RAW → BRONZE → SILVER → GOLD). Incluye un motor de ejecución DAG con typed errors, detección de deadlock, sanitización de dependencias por feature flags, circuit breaker, checkpoints JSON, escritura **adaptativa overwrite/MERGE** en Gold con auditoría Delta, y 6 workflows especializados.
+
+**Versión actual:** v5 — Force-refresh + adaptive Gold writes + audit metrics.
 
 ---
 
@@ -334,12 +336,137 @@ graph TB
 | Dependencia | Versión |
 |-------------|---------|
 | Scala | 2.12 |
-| Spark Core/SQL | 3.3.1 |
-| Delta Lake | 2.2.0 |
+| Spark Core/SQL | 3.5 |
+| Delta Lake | 3.x |
 | JFreeChart | Latest |
 | Db2 JCC | 11.5.5 |
 
 **Artefacto:** `root-assembly-2.0.0.jar` (fat JAR)
+
+---
+
+## Arquitectura Final del ETL (v5)
+
+Esta sección consolida la evolución del pipeline tras los fixes de estabilidad y rendimiento aplicados sobre Bronze/Silver/Gold y el motor DAG.
+
+### Vista end-to-end
+
+```mermaid
+flowchart LR
+    SIM["sales-simulator<br/>genera ventas en raw"] --> RAW[("RAW CSVs<br/>COS bucket raw")]
+    RAW --> BR["BronzeLayer<br/>shouldSkip + force-refresh"]
+    BR --> BRONZE[("BRONZE Parquet")]
+    BRONZE --> SL["SilverLayer<br/>shouldSkip + force-refresh"]
+    SL --> SILVER[("SILVER Parquet")]
+    SILVER --> GL["GoldLayer<br/>writeOrMergeDelta + audit"]
+    GL --> GOLD[("GOLD Delta Lake")]
+
+    GOLD --> VAC["vacuumDeltaTables<br/>opt-in semanal"]
+    GOLD --> AUDIT["AUDIT log<br/>numInserted / numUpdated / numFiles"]
+    GOLD --> BI["Power BI / Db2 export"]
+```
+
+### Cambios incorporados (v4 → v5)
+
+| Componente | Cambio | Beneficio |
+|---|---|---|
+| `WorkflowRegistry.buildDag` | Sanitiza dependencias eliminadas por feature flags | Evita deadlocks por dep huérfanas |
+| `DagExecutor.scheduleReady` | Detección de deadlock + early exit `Failed(Unreachable)` | Termina la sesión Spark en vez de colgar 15 min |
+| `DataLakeIO.shouldSkip` | Reemplaza `pathExists` en 13 sitios; respeta `PIPELINE_FORCE_REFRESH` (default `true`) | Bronze/Silver/Gold reprocesan datos nuevos sin borrado manual |
+| `DataLakeIO.writeOrMergeDelta` | Estrategia adaptativa overwrite ↔ MERGE según tamaño actual | Costo bajo hoy, escala cuando crece |
+| `DataLakeIO.writeDeltaReplaceWhere` | Overwrite parcial por predicate | KPIs reescriben solo los meses tocados |
+| `DataLakeIO.logLastOperationMetrics` | Audita el último commit Delta | Visibilidad: qué se insertó/actualizó/borró |
+| `DataLakeIO.vacuumDeltaTables` | VACUUM batch best-effort | Limpia parquets de versiones viejas |
+| `submit-to-ae.sh --skip-csv-upload` | Preserva CSVs producidos por el simulator | Permite re-runs sin pisar datos generados |
+
+### Capas: estrategia de escritura
+
+```mermaid
+flowchart TB
+    subgraph Bronze["BRONZE \u2014 Parquet"]
+        B1["mode(overwrite)<br/>shouldSkip respeta PIPELINE_FORCE_REFRESH"]
+    end
+    subgraph Silver["SILVER \u2014 Parquet"]
+        S1["mode(overwrite)<br/>shouldSkip respeta PIPELINE_FORCE_REFRESH"]
+    end
+    subgraph Gold["GOLD \u2014 Delta Lake"]
+        G1["dim_producto / dim_operador<br/>fact_produccion_minera / kpi_mineria<br/>\u2192 writeDelta full overwrite"]
+        G2["kpi_ventas_mensuales<br/>\u2192 writeDeltaReplaceWhere<br/>(predicate por a\u00f1os tocados)"]
+        G3["fact_ventas / dim_cliente<br/>\u2192 writeOrMergeDelta<br/>(overwrite < umbral, MERGE \u2265 umbral)"]
+    end
+
+    Bronze --> Silver --> Gold
+```
+
+### Decisión adaptativa overwrite ↔ MERGE
+
+`DataLakeIO.chooseWriteStrategy` resuelve la estrategia con esta precedencia:
+
+```mermaid
+flowchart TD
+    A["Inicio writeOrMergeDelta(table, threshold)"] --> B{"PIPELINE_GOLD_FORCE_MERGE = true?"}
+    B -- s\u00ed --> M["IncrementalMerge"]
+    B -- no --> C{"&lt;TABLE&gt;_MERGE_THRESHOLD<br/>en env?"}
+    C -- s\u00ed --> D["usar override por tabla"]
+    C -- no --> E{"PIPELINE_MERGE_THRESHOLD_ROWS<br/>en env?"}
+    E -- s\u00ed --> F["usar override global"]
+    E -- no --> G["usar threshold del par\u00e1metro<br/>(5M fact / 1M dim)"]
+    D --> H{"countDeltaRows(table) >= threshold?"}
+    F --> H
+    G --> H
+    H -- s\u00ed --> M
+    H -- no --> O["FullOverwrite"]
+    M --> X["mergeDelta + AUDIT"]
+    O --> Y["writeDelta + AUDIT"]
+```
+
+### Variables de entorno operativas
+
+| Variable | Default | Efecto |
+|---|---|---|
+| `PIPELINE_FORCE_REFRESH` | `true` | `false` activa el comportamiento idempotente original (skip si la tabla existe) |
+| `PIPELINE_GOLD_FORCE_MERGE` | `false` | Fuerza MERGE en `fact_ventas` y `dim_cliente` sin esperar al umbral |
+| `PIPELINE_MERGE_THRESHOLD_ROWS` | — | Cota global que pisa los defaults (5M fact, 1M dim) |
+| `FACT_VENTAS_MERGE_THRESHOLD` | `5_000_000` | Override solo para `fact_ventas` |
+| `DIM_CLIENTE_MERGE_THRESHOLD` | `1_000_000` | Override solo para `dim_cliente` |
+| `PIPELINE_VACUUM` | `false` | `true` corre `VACUUM` 7d sobre las 7 tablas Gold al final del run |
+
+### DAG: deadlock detection
+
+```mermaid
+stateDiagram-v2
+    [*] --> Build: WorkflowRegistry.buildDag()
+    Build --> Sanitize: Filtrar deps removidas por feature flags
+    Sanitize --> Schedule: DagExecutor.scheduleReady()
+    Schedule --> Running: Hay tareas listas
+    Running --> Completed: Todas las deps satisfechas
+    Schedule --> Deadlock: No hay listas y quedan pendientes
+    Deadlock --> EarlyExit: Marcar Failed(Unreachable) y cerrar sesi\u00f3n
+    Completed --> [*]
+    EarlyExit --> [*]
+```
+
+### Auditoría por tabla Delta
+
+Cada escritura Gold emite una línea por commit con métricas extraídas del Delta log:
+
+```
+\ud83d\udcca AUDIT fact_ventas v3 op=MERGE ts=2026-04-17 numOutputRows=42202 \\
+  numTargetRowsInserted=42202 numTargetRowsUpdated=0 numFiles=1
+```
+
+Métricas reportadas: `numOutputRows`, `numTargetRowsInserted`, `numTargetRowsUpdated`, `numTargetRowsDeleted`, `numFiles`, `numRemovedFiles`.
+
+### Mantenimiento programado
+
+```mermaid
+flowchart LR
+    CRON["Schedule semanal"] --> RUN["submit-to-ae.sh --skip-csv-upload"]
+    RUN -- "PIPELINE_VACUUM=true" --> V["vacuumDeltaTables(7d retention)"]
+    V --> CLEAN["Bucket gold limpio<br/>parquets v\u2264N-1 eliminados"]
+```
+
+Recomendación operativa: VACUUM semanal para Gold; `OPTIMIZE` (compactación) cuando `numFiles > 100` por tabla.
 
 ---
 
