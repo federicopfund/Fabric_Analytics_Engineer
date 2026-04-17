@@ -26,16 +26,28 @@ object SparkFactory {
       synchronized {
         if (instance == null) {
 
+          // Memoria/paralelismo según modo (AE tiene recursos propios, local es constrained)
+          val isAe = mode == IbmAnalyticsEngine
+          val driverMem       = if (isAe) "1g"  else "512m"
+          val executorMem     = if (isAe) "2g"  else "512m"
+          val shufflePartitions = if (isAe) "8" else "2"
+          val broadcastJoin   = if (isAe) "10MB" else "5MB"
+
           var builder = SparkSession.builder()
             .appName("BatchETL-Lakehouse")
             .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-            .config("spark.sql.shuffle.partitions", "2")
-            .config("spark.driver.memory", "512m")
-            .config("spark.sql.autoBroadcastJoinThreshold", "5MB")
+            .config("spark.sql.shuffle.partitions", shufflePartitions)
+            .config("spark.driver.memory", driverMem)
+            .config("spark.sql.autoBroadcastJoinThreshold", broadcastJoin)
             .config("spark.memory.fraction", "0.5")
             .config("spark.memory.storageFraction", "0.2")
-            .config("spark.executor.memory", "512m")
+            .config("spark.executor.memory", executorMem)
             .config("spark.cleaner.periodicGC.interval", "5min")
+            // AQE (Adaptive Query Execution) — optimiza partitions y joins en runtime
+            .config("spark.sql.adaptive.enabled", "true")
+            .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+            .config("spark.sql.adaptive.skewJoin.enabled", "true")
+            .config("spark.sql.adaptive.localShuffleReader.enabled", "true")
             // Delta Lake extensions
             .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
             .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
@@ -51,6 +63,17 @@ object SparkFactory {
                 .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
                 .config("spark.hadoop.fs.s3a.path.style.access", "true")
                 .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "true")
+                // ── Delta Lake sobre S3A requiere LogStore específico ──
+                // Single-driver log store: seguro cuando solo un driver escribe al bucket.
+                // Sin esto, Delta cuelga en "Filtering files for query" por listings lentos.
+                .config("spark.delta.logStore.class", "io.delta.storage.S3SingleDriverLogStore")
+                .config("spark.databricks.delta.logStore.crossCloud.fatal", "false")
+                // Optimizaciones Delta en S3
+                .config("spark.databricks.delta.retentionDurationCheck.enabled", "false")
+                // snapshotPartitions=1 reduce overhead por cada Delta read (menos jobs "Filtering files for query")
+                .config("spark.databricks.delta.snapshotPartitions", "1")
+                // Desactivar stats.skipping: evita que Delta lance job extra por cada read
+                .config("spark.databricks.delta.stats.skipping", "false")
                 .config("spark.sql.catalogImplementation", "in-memory")
 
             case HdfsCluster =>
