@@ -116,8 +116,23 @@ submit_application() {
     "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
     "spark.hadoop.fs.s3a.path.style.access": "true",
     "spark.hadoop.fs.s3a.connection.ssl.enabled": "true",
+    "spark.hadoop.fs.s3a.connection.establish.timeout": "30000",
+    "spark.hadoop.fs.s3a.connection.timeout": "60000",
+    "spark.hadoop.fs.s3a.attempts.maximum": "3",
     "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
-    "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+    "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+    "spark.delta.logStore.class": "io.delta.storage.S3SingleDriverLogStore",
+    "spark.databricks.delta.retentionDurationCheck.enabled": "false",
+    "spark.databricks.delta.snapshotPartitions": "2",
+    "spark.sql.adaptive.enabled": "true",
+    "spark.sql.adaptive.coalescePartitions.enabled": "true",
+    "spark.sql.adaptive.skewJoin.enabled": "true",
+    "spark.sql.shuffle.partitions": "8",
+    "spark.dynamicAllocation.enabled": "false",
+    "spark.dynamicAllocation.executorIdleTimeout": "30s",
+    "spark.dynamicAllocation.shutdownTimeout": "10s",
+    "spark.eventLog.enabled": "true",
+    "spark.eventLog.dir": "s3a://datalake-raw-us-south-dev/spark-events"
 }
 EOF
 )
@@ -129,6 +144,10 @@ EOF
     env_json=$(cat <<EOF
 {
     "EXECUTION_MODE": "IBM_AE",
+    "PIPELINE_CLEAR_CHECKPOINTS": "true",
+    "PIPELINE_DAG_TIMEOUT_MIN": "10",
+    "PIPELINE_CHARTS_ENABLED": "false",
+    "DB2_EXPORT_PARALLELISM": "7",
     "AE_INSTANCE_ID": "${AE_INSTANCE_ID}",
     "COS_ACCESS_KEY": "${COS_ACCESS_KEY}",
     "COS_SECRET_KEY": "${COS_SECRET_KEY}",
