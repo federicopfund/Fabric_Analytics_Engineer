@@ -13,23 +13,33 @@
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 
-# ── Configuration ──
-AE_INSTANCE_ID="${AE_INSTANCE_ID:-a688f3c4-efa9-4f12-842c-6a8d73a7ed2e}"
-AE_REGION="${AE_REGION:-us-south}"
-
-COS_ACCESS_KEY="${COS_ACCESS_KEY:-786065478ff34d3b84016125490a4d12}"
-COS_SECRET_KEY="${COS_SECRET_KEY:-838da9c9a9cd2521d51e856da0dd876884f8108226f5bd7c}"
-COS_ENDPOINT="${COS_ENDPOINT:-s3.us-south.cloud-object-storage.appdomain.cloud}"
-COS_BUCKET_JARS="${COS_BUCKET_JARS:-datalake-raw-us-south-dev}"
-
-DB2_HOSTNAME="${DB2_HOSTNAME:-6667d8e9-9d4d-4ccb-ba32-21da3bb5aafc.c1ogj3sd0tgtu0lqde00.databases.appdomain.cloud}"
-DB2_PORT="${DB2_PORT:-30376}"
-DB2_DATABASE="${DB2_DATABASE:-bludb}"
-DB2_USERNAME="${DB2_USERNAME:-qtn87286}"
-DB2_PASSWORD="${DB2_PASSWORD:-wiHDV4ror4E71lMw}"
-DB2_SSL="${DB2_SSL:-true}"
-
+# ── Load .env ──
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/../.env"
+
+if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    source "$ENV_FILE"
+    set +a
+else
+    echo "[ERROR] Archivo .env no encontrado en: $ENV_FILE"
+    echo "        Copiar .env.example a .env y completar las credenciales."
+    exit 1
+fi
+
+# ── Configuration (from .env, no defaults for secrets) ──
+: "${AE_INSTANCE_ID:?Variable AE_INSTANCE_ID requerida en .env}"
+: "${AE_REGION:?Variable AE_REGION requerida en .env}"
+: "${COS_ACCESS_KEY:?Variable COS_ACCESS_KEY requerida en .env}"
+: "${COS_SECRET_KEY:?Variable COS_SECRET_KEY requerida en .env}"
+: "${COS_ENDPOINT:?Variable COS_ENDPOINT requerida en .env}"
+: "${COS_BUCKET_JARS:?Variable COS_BUCKET_JARS requerida en .env}"
+: "${DB2_HOSTNAME:?Variable DB2_HOSTNAME requerida en .env}"
+: "${DB2_PORT:?Variable DB2_PORT requerida en .env}"
+: "${DB2_DATABASE:?Variable DB2_DATABASE requerida en .env}"
+: "${DB2_USERNAME:?Variable DB2_USERNAME requerida en .env}"
+: "${DB2_PASSWORD:?Variable DB2_PASSWORD requerida en .env}"
+: "${DB2_SSL:=true}"
 SCALA_PROJECT_DIR="$(cd "${SCRIPT_DIR}/../../transformation/spark-jobs/pipelines/batch-etl-scala" 2>/dev/null && pwd || echo "${SCRIPT_DIR}/../../../transformation/spark-jobs/pipelines/batch-etl-scala")"
 JAR_NAME="root-assembly-2.0.0.jar"
 JAR_LOCAL="${SCALA_PROJECT_DIR}/target/scala-2.12/${JAR_NAME}"
@@ -52,10 +62,23 @@ preflight() {
         log_info "Instalando plugin analytics-engine-v3..."
         ibmcloud plugin install analytics-engine-v3 -f
     fi
-    # Verify logged in
-    if ! ibmcloud target &>/dev/null; then
-        log_error "No logueado en IBM Cloud. Ejecutar: ibmcloud login --sso"
-        exit 1
+    # Authenticate if not logged in
+    if ibmcloud target 2>&1 | grep -q "Not logged in"; then
+        log_warn "No logueado en IBM Cloud. Iniciando autenticación..."
+        if [[ -n "${IBMCLOUD_API_KEY:-}" ]]; then
+            log_info "Autenticando con API Key desde .env..."
+            ibmcloud login --apikey "${IBMCLOUD_API_KEY}" -r "${IBMCLOUD_REGION:-us-south}" || {
+                log_error "Falló la autenticación con API Key."
+                exit 1
+            }
+        else
+            log_info "No se encontró IBMCLOUD_API_KEY en .env. Usando login interactivo (SSO)..."
+            ibmcloud login --sso -r "${IBMCLOUD_REGION:-us-south}" || {
+                log_error "Falló la autenticación SSO."
+                exit 1
+            }
+        fi
+        log_info "Autenticación exitosa ✔"
     fi
 }
 
