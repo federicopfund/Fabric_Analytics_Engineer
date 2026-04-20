@@ -4,47 +4,64 @@ COS endpoints, credentials, bucket names, SparkSession builder,
 and Analytics Engine integration.
 """
 import os
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Load .env file
+# ---------------------------------------------------------------------------
+_ENV_FILE = Path(__file__).resolve().parents[3] / "infrastructure" / "ibm-cloud" / ".env"
+
+if _ENV_FILE.exists():
+    with open(_ENV_FILE) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                os.environ.setdefault(key.strip(), value.strip())
 
 # ---------------------------------------------------------------------------
 # IBM Cloud Object Storage
 # ---------------------------------------------------------------------------
 COS_CONFIG = {
-    "access_key": os.environ.get("COS_ACCESS_KEY", "786065478ff34d3b84016125490a4d12"),
-    "secret_key": os.environ.get("COS_SECRET_KEY", "838da9c9a9cd2521d51e856da0dd876884f8108226f5bd7c"),
+    "access_key": os.environ["COS_ACCESS_KEY"],
+    "secret_key": os.environ["COS_SECRET_KEY"],
     "endpoint": os.environ.get("COS_ENDPOINT", "s3.us-south.cloud-object-storage.appdomain.cloud"),
     "region": "us-south",
 }
 
 BUCKETS = {
-    "raw": "datalake-raw-us-south",
-    "bronze": "datalake-bronze-us-south",
-    "silver": "datalake-silver-us-south",
-    "gold": "datalake-gold-us-south",
+    "raw": os.environ.get("COS_BUCKET_RAW", "datalake-raw-us-south"),
+    "bronze": os.environ.get("COS_BUCKET_BRONZE", "datalake-bronze-us-south"),
+    "silver": os.environ.get("COS_BUCKET_SILVER", "datalake-silver-us-south"),
+    "gold": os.environ.get("COS_BUCKET_GOLD", "datalake-gold-us-south"),
 }
 
 # ---------------------------------------------------------------------------
 # IBM Db2 on Cloud
 # ---------------------------------------------------------------------------
 DB2_CONFIG = {
-    "hostname": os.environ.get("DB2_HOST", "6667d8e9-9d4d-4ccb-ba32-21da3bb5aafc.c1ogj3sd0tgtu0lqde00.databases.appdomain.cloud"),
+    "hostname": os.environ["DB2_HOSTNAME"],
     "port": os.environ.get("DB2_PORT", "30376"),
-    "database": "bludb",
-    "username": os.environ.get("DB2_USER", "qtn87286"),
-    "password": os.environ.get("DB2_PASS", "G5VYX4VkCRqrKeNz"),
+    "database": os.environ.get("DB2_DATABASE", "bludb"),
+    "username": os.environ["DB2_USERNAME"],
+    "password": os.environ["DB2_PASSWORD"],
 }
 
 # ---------------------------------------------------------------------------
 # IBM Analytics Engine Serverless
 # ---------------------------------------------------------------------------
+_ae_instance = os.environ["AE_INSTANCE_ID"]
+_ae_region = os.environ.get("AE_REGION", "us-south")
+
 AE_CONFIG = {
-    "instance_id": os.environ.get("AE_INSTANCE_ID", "a688f3c4-efa9-4f12-842c-6a8d73a7ed2e"),
-    "api_key": os.environ.get("AE_API_KEY", "xHUG0tM8_CBFioN8ckds52eLxys_bnHL3CK4PCwg48o-"),
-    "region": "us-south",
+    "instance_id": _ae_instance,
+    "api_key": os.environ["AE_API_KEY"],
+    "region": _ae_region,
     "api_endpoint": os.environ.get("AE_API_ENDPOINT",
-        "https://api.us-south.ae.cloud.ibm.com/v3/analytics_engines/a688f3c4-efa9-4f12-842c-6a8d73a7ed2e"),
+        f"https://api.{_ae_region}.ae.cloud.ibm.com/v3/analytics_engines/{_ae_instance}"),
     "spark_applications_url": os.environ.get("AE_SPARK_APPS_URL",
-        "https://api.us-south.ae.cloud.ibm.com/v3/analytics_engines/a688f3c4-efa9-4f12-842c-6a8d73a7ed2e/spark_applications"),
-    "history_ui": "https://spark-console.us-south.ae.cloud.ibm.com/v3/analytics_engines/a688f3c4-efa9-4f12-842c-6a8d73a7ed2e/spark_history_ui",
+        f"https://api.{_ae_region}.ae.cloud.ibm.com/v3/analytics_engines/{_ae_instance}/spark_applications"),
+    "history_ui": f"https://spark-console.{_ae_region}.ae.cloud.ibm.com/v3/analytics_engines/{_ae_instance}/spark_history_ui",
 }
 
 DB2_JDBC_URL = (
