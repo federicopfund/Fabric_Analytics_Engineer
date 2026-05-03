@@ -136,11 +136,19 @@ upload_to_cos() {
 submit_application() {
     log_info "Enviando Sales Simulator a Analytics Engine..."
 
-    # Build spark-submit args
+    # Build spark-submit args (cada token va en un --arg propio para ibmcloud ae-v3)
     local sim_args="--orders ${SIM_ORDERS}"
     [[ -n "$SIM_START" ]] && sim_args+=" --start ${SIM_START}"
     [[ -n "$SIM_END" ]]   && sim_args+=" --end ${SIM_END}"
     [[ -n "$SIM_SEED" ]]  && sim_args+=" --seed ${SIM_SEED}"
+
+    local -a arg_flags=()
+    # shellcheck disable=SC2206
+    local sim_args_arr=( ${sim_args} )
+    local tok
+    for tok in "${sim_args_arr[@]}"; do
+        arg_flags+=( --arg "${tok}" )
+    done
 
     local conf_json
     conf_json=$(cat <<EOF
@@ -186,6 +194,7 @@ EOF
         --name "${app_name}" \
         --conf "${conf_json}" \
         --env "${env_json}" \
+        "${arg_flags[@]}" \
         --runtime '{"spark_version": "3.5"}' \
         --output json 2>&1 | grep -v '^Performing')
 
