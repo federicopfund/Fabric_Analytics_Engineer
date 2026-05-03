@@ -86,7 +86,7 @@ object GoldLayer {
       FROM silver_catalogo_productos cp
       LEFT JOIN silver_rentabilidad_producto rp ON cp.Cod_Producto = rp.Cod_Producto
     """)
-    DataLakeIO.writeDelta(df.coalesce(1), goldPath, tableName)
+    DataLakeIO.writeDelta(df.repartition(1), goldPath, tableName)
     println(s"  ✔ gold/$tableName")
   }
 
@@ -118,7 +118,7 @@ object GoldLayer {
     """)
     // Adaptativo: overwrite hasta 1M filas, MERGE (SCD-1 por cliente_key) por encima.
     DataLakeIO.writeOrMergeDelta(
-      df.coalesce(1),
+      df.repartition(1),
       goldPath,
       tableName,
       mergeKeys = Seq("cliente_key"),
@@ -163,7 +163,7 @@ object GoldLayer {
     // emite full-refresh, el MERGE igual funciona pero pierde la ganancia incremental;
     // para activar el flujo incremental real, filtrar `df` por watermark antes de llamar.
     DataLakeIO.writeOrMergeDelta(
-      df.coalesce(1),
+      df.repartition(1),
       goldPath,
       tableName,
       mergeKeys = Seq("orden_id"),
@@ -215,7 +215,7 @@ object GoldLayer {
       logger.warn(s"$tableName: no hay filas a escribir, skip"); df.unpersist(); return
     }
     val predicate = s"anio IN (${aniosTocados.mkString(", ")})"
-    DataLakeIO.writeDeltaReplaceWhere(df.coalesce(1), goldPath, tableName, predicate)
+    DataLakeIO.writeDeltaReplaceWhere(df.repartition(1), goldPath, tableName, predicate)
     df.unpersist()
     println(s"  ✔ gold/$tableName  [replaceWhere $predicate]")
   }
@@ -247,7 +247,7 @@ object GoldLayer {
         current_timestamp() AS _gold_updated_at
       FROM silver_produccion_operador
     """)
-    DataLakeIO.writeDelta(df.coalesce(1), goldPath, tableName)
+    DataLakeIO.writeDelta(df.repartition(1), goldPath, tableName)
     println(s"  ✔ gold/$tableName")
   }
 
@@ -277,7 +277,7 @@ object GoldLayer {
       FROM silver_eficiencia_minera em
       CROSS JOIN (SELECT SUM(Total_Mineral) AS global_mineral FROM silver_produccion_por_pais) totals
     """)
-    DataLakeIO.writeDelta(df.coalesce(1), goldPath, tableName)
+    DataLakeIO.writeDelta(df.repartition(1), goldPath, tableName)
     println(s"  ✔ gold/$tableName")
   }
 
@@ -309,7 +309,7 @@ object GoldLayer {
         current_timestamp() AS _gold_updated_at
       FROM silver_produccion_por_pais pp ORDER BY produccion_neta DESC
     """)
-    DataLakeIO.writeDelta(df.coalesce(1), goldPath, tableName)
+    DataLakeIO.writeDelta(df.repartition(1), goldPath, tableName)
     println(s"  ✔ gold/$tableName")
   }
 }
